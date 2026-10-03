@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "preset-aurora-bridge",
+  "name": "Aurora Bridge",
+  "image": "default-background.png",
+  "appearance": "auto",
+  "art": {
+    "focusX": 0.72,
+    "focusY": 0.5,
+    "safeArea": "left",
+    "taskMode": "ambient"
+  }
+}

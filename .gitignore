@@ -1,0 +1,25 @@
+# Local builds, runtime state and personal wallpaper libraries
+artifacts/
+bin/
+**/bin/
+**/obj/
+runtime/
+release/
+*.exe
+*.pdb
+*.zip
+*.log
+*.tmp
+motion-token.txt
+control-config.json
+state.json
+verify.json
+verify.log
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+AGENTS.md
+TASK_PROGRESS.md
