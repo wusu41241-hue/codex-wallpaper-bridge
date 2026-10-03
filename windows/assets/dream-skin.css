@@ -756,6 +756,12 @@ html.codex-dream-skin.dream-motion-ready .dream-task {
   background: transparent !important;
 }
 
+/* Dots embeds a messaging workspace with its own page and thread backgrounds. */
+html.codex-dream-skin.dream-motion-ready main.main-surface .messaging-root.messaging-embedded,
+html.codex-dream-skin.dream-motion-ready main.main-surface .messaging-root.messaging-embedded .thread-pane {
+  background: transparent !important;
+}
+
 /* The current Codex footer has a white fill and a separate fade above it.
    Keep the wallpaper visible around the native composer at the window bottom. */
 html.codex-dream-skin.dream-motion-ready main.main-surface [data-thread-scroll-footer],

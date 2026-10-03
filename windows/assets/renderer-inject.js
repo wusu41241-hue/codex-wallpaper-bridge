@@ -608,7 +608,7 @@
       const shell = discoverShell();
       const { shellMain, shellSidebar, composer } = shell;
       const shellContent = composer || document.querySelector('[role="main"]') ||
-        document.querySelector('[data-app-shell-main-content-layout]');
+        document.querySelector('[data-app-shell-main-content-layout], .messaging-root.messaging-embedded');
       if (!shellMain || !shellContent) {
         // Keep the shared media alive through the brief gap between cached
         // pages being hidden and shown. It is still cleaned up on auxiliary UI.

@@ -43,6 +43,8 @@ function createFixture({
   composerButtonLabel = null,
   sidebarPresent = true,
   homeContentsLayout = false,
+  composerPresent = true,
+  dotsPresent = false,
 }) {
   const nodes = new Map();
   const rootClasses = new Set(staleSkin ? ["codex-dream-skin"] : []);
@@ -225,8 +227,9 @@ function createFixture({
         return hasShell && hasSidebar ? shellSidebar : null;
       }
       if (selector.includes("composer-surface-chrome") || selector.includes("data-codex-composer")) {
-        return hasShell ? composer : null;
+        return hasShell && composerPresent ? composer : null;
       }
+      if (selector.includes('.messaging-root.messaging-embedded')) return hasShell && dotsPresent ? routeMain : null;
       if (selector.includes("home-icon") || selector.includes("data-home-ambient-suggestions")) {
         return hasShell && homePresent ? routeMain : null;
       }
@@ -237,10 +240,10 @@ function createFixture({
         return hasShell ? [shellMain, ...(secondShellPresent ? [secondShell] : [])] : [];
       }
       if (selector.includes("composer-surface-chrome") || selector.includes("data-codex-composer")) {
-        return hasShell ? [composer] : [];
+        return hasShell && composerPresent ? [composer] : [];
       }
       if (selector === "aside") return hasShell && hasSidebar ? [shellSidebar] : [];
-      if (selector === '[role="main"]') return hasShell ? [routeMain] : [];
+      if (selector === '[role="main"]') return hasShell && !dotsPresent ? [routeMain] : [];
       if (selector === ".dream-task") return routeClasses.has("dream-task") ? [routeMain] : [];
       if (selector === ".dream-home-utility") {
         return utilityClasses.has("dream-home-utility") ? [utilityNode] : [];
@@ -329,6 +332,12 @@ function createFixture({
 }
 
 const main = createFixture({ shellPresent: true });
+const dots = createFixture({ shellPresent: true, composerPresent: false, dotsPresent: true });
+vm.runInNewContext(payload, dots.context);
+assert.equal(dots.rootClasses.has('codex-dream-skin'), true,
+  'Dots can keep the wallpaper without a chat composer or role=main');
+assert.equal(dots.shellMain.classList.contains('dream-shell-main'), true);
+assert.equal(dots.nodes.has('codex-dream-skin-style'), true);
 const modernHome = createFixture({ shellPresent: true, homePresent: true, homeContentsLayout: true });
 vm.runInNewContext(payload, modernHome.context);
 assert.equal(modernHome.routeClasses.has("dream-home"), true);

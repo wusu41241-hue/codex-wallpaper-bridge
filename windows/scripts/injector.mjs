@@ -19,7 +19,7 @@ export const CODEX_SELECTORS = {
   shell: "main.main-surface, main[data-app-shell-main-surface], [data-app-shell-main-surface]",
   sidebar: 'aside.app-shell-left-panel, aside[data-testid="app-shell-floating-left-panel"], aside[data-app-shell-left-panel-appearance], .app-shell-left-panel',
   composer: ".composer-surface-chrome, [data-codex-composer-root], [data-codex-composer]",
-  main: '[role="main"], [data-app-shell-main-content-layout]',
+  main: '[role="main"], [data-app-shell-main-content-layout], .messaging-root.messaging-embedded',
   pet: "[data-codex-pet-id]",
   home: '[role="main"]:has([data-testid="home-icon"]), [role="main"]:has([data-home-ambient-suggestions]), [data-home-ambient-suggestions]',
 };
@@ -1023,7 +1023,7 @@ async function verifySession(session, expectedTheme = null) {
       fullscreen: !expectsFullscreenAsset || !result.fullscreenMode ||
         (result.fullscreenAssetAvailable && result.fullscreenAssetActive),
       motion: result.motionReady,
-      controls: !expectsRailgun || (result.railgunControls &&
+      controls: !expectsRailgun || !activeComposer || (result.railgunControls &&
         (result.lightningSendButton || result.stopControlPresent)),
       highVisibility: !expectsHighVisibility || result.artVisibilityHigh,
       clearVisibility: !expectsClearVisibility || result.artVisibilityClear,

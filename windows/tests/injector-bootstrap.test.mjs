@@ -13,7 +13,7 @@ function createFixture() {
   const observers = [];
   const timers = new Map();
   let nextTimer = 1;
-  const markers = { shell: false, sidebar: false, content: false };
+  const markers = { shell: false, sidebar: false, content: false, dots: false };
   const context = {
     window: { installs: [] },
     document: {
@@ -23,9 +23,9 @@ function createFixture() {
         if (selector === CODEX_SELECTORS.pet) return null;
         if (selector === CODEX_SELECTORS.shell) return markers.shell ? {} : null;
         if (selector === CODEX_SELECTORS.sidebar) return markers.sidebar ? {} : null;
-        if (selector === CODEX_SELECTORS.composer || selector === CODEX_SELECTORS.main) {
-          return markers.content ? {} : null;
-        }
+        if (selector === CODEX_SELECTORS.composer) return markers.content ? {} : null;
+        if (selector === CODEX_SELECTORS.main) return markers.content ||
+          (markers.dots && selector.includes('.messaging-root.messaging-embedded')) ? {} : null;
         return null;
       },
       querySelectorAll() { return []; },
@@ -59,6 +59,12 @@ function createFixture() {
 }
 
 const guarded = createFixture();
+const coldDots = createFixture();
+coldDots.markers.shell = true;
+coldDots.markers.dots = true;
+vm.runInNewContext(earlyPayloadFor('window.installs.push("dots")', 'dots'), coldDots.context);
+assert.deepEqual(coldDots.context.window.installs, ['dots'],
+  'a trusted Dots messaging workspace accepts early skin injection without a composer');
 vm.runInNewContext(earlyPayloadFor('window.installs.push("guarded")', "guarded"), guarded.context);
 assert.deepEqual(guarded.context.window.installs, [], "Auxiliary app targets must remain untouched.");
 guarded.markers.shell = true;
