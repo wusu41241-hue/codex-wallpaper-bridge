@@ -734,10 +734,7 @@ html.codex-dream-skin.dream-motion-ready.dream-art-wide:is(.dream-task-ambient, 
   box-shadow: none !important;
 }
 
-html.codex-dream-skin.dream-motion-ready [class~="group/application-menu-top-bar"],
-html.codex-dream-skin.dream-motion-ready aside.app-shell-left-panel,
-html.codex-dream-skin.dream-motion-ready.dream-theme-light.dream-art-visibility-clear.dream-art-wide:has(main.main-surface.dream-home-shell) aside.app-shell-left-panel,
-html.codex-dream-skin.dream-motion-ready.dream-theme-light.dream-art-visibility-clear.dream-art-wide:is(.dream-task-ambient, .dream-task-banner):has(main.main-surface:not(.dream-home-shell)) aside.app-shell-left-panel {
+html.codex-dream-skin.dream-motion-ready [class~="group/application-menu-top-bar"] {
   background: transparent !important;
   backdrop-filter: none !important;
 }
@@ -793,4 +790,42 @@ html.codex-dream-skin.dream-motion-ready.dream-art-wide:is(.dream-task-ambient, 
 html.codex-dream-skin.dream-motion-ready .dream-task::before,
 html.codex-dream-skin.dream-motion-ready .dream-home.dream-home-legacy > div:first-child > div:first-child > div:first-child {
   background-image: none !important;
+}
+
+/* Liquid glass follows the native sidebar bounds, including the compact rail.
+   Tint and edge highlights belong to the panel; text and controls stay opaque. */
+:root.codex-dream-skin {
+  --dream-glass-tint: rgb(255 255 255 / .14);
+  --dream-glass-sheen: rgb(255 255 255 / .24);
+  --dream-glass-edge: rgb(255 255 255 / .52);
+  --dream-glass-inner-edge: rgb(255 255 255 / .18);
+  --dream-glass-shadow: rgb(20 36 58 / .14);
+}
+
+:root.codex-dream-skin.dream-theme-dark {
+  --dream-glass-tint: rgb(16 22 34 / .22);
+  --dream-glass-sheen: rgb(255 255 255 / .12);
+  --dream-glass-edge: rgb(255 255 255 / .28);
+  --dream-glass-inner-edge: rgb(255 255 255 / .08);
+  --dream-glass-shadow: rgb(0 0 0 / .28);
+}
+
+html.codex-dream-skin aside.app-shell-left-panel,
+html.codex-dream-skin.dream-art-wide:has(main.main-surface.dream-home-shell) aside.app-shell-left-panel,
+html.codex-dream-skin.dream-art-wide:is(.dream-task-ambient, .dream-task-banner):has(main.main-surface:not(.dream-home-shell)) aside.app-shell-left-panel,
+html.codex-dream-skin.dream-theme-light.dream-art-visibility-clear.dream-art-wide:has(main.main-surface.dream-home-shell) aside.app-shell-left-panel,
+html.codex-dream-skin.dream-theme-light.dream-art-visibility-clear.dream-art-wide:is(.dream-task-ambient, .dream-task-banner):has(main.main-surface:not(.dream-home-shell)) aside.app-shell-left-panel {
+  background: linear-gradient(135deg,
+    var(--dream-glass-sheen), transparent 38%,
+    transparent 68%, var(--dream-glass-inner-edge)),
+    var(--dream-glass-tint) !important;
+  border: 0 !important;
+  border-radius: 0 20px 20px 0 !important;
+  box-shadow: inset -1px 0 var(--dream-glass-edge),
+    inset 0 1px var(--dream-glass-edge),
+    inset 0 -1px var(--dream-glass-inner-edge),
+    inset 1px 0 var(--dream-glass-inner-edge),
+    6px 0 24px -12px var(--dream-glass-shadow) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(1.35) !important;
+  backdrop-filter: blur(24px) saturate(1.35) !important;
 }
