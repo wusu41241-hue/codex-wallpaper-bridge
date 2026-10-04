@@ -759,6 +759,13 @@ html.codex-dream-skin.dream-motion-ready main.main-surface .messaging-root.messa
   background: transparent !important;
 }
 
+/* Dots adds an anchored decorative fade above its messaging workspace. Keep
+   the native header controls, but let the wallpaper show through this sheet. */
+html.codex-dream-skin.dream-motion-ready main.main-surface:has(.messaging-root.messaging-embedded)
+  [aria-hidden="true"].pointer-events-none.absolute.top-0.origin-top[class~="w-[anchor-size(width)]"] {
+  background: transparent !important;
+}
+
 /* The current Codex footer has a white fill and a separate fade above it.
    Keep the wallpaper visible around the native composer at the window bottom. */
 html.codex-dream-skin.dream-motion-ready main.main-surface [data-thread-scroll-footer],
