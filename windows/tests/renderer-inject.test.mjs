@@ -52,6 +52,9 @@ function createFixture({
   const revokedUrls = [];
   const observers = [];
   const timeouts = [];
+  let fullDocumentScans = 0;
+  let rootStyleSamples = 0;
+  let motionContextRequests = 0;
   let objectUrlCount = 0;
   let hasShell = shellPresent;
   let hasSidebar = sidebarPresent;
@@ -68,11 +71,9 @@ function createFixture({
   };
   const makeClassList = (classes = new Set(), onMutation = () => {}) => ({
     add(...values) {
-      let changed = false;
-      for (const value of values) {
-        if (!classes.has(value)) { classes.add(value); changed = true; }
-      }
-      if (changed) onMutation();
+      for (const value of values) classes.add(value);
+      // DOMTokenList.add writes the class attribute even for an existing token.
+      onMutation();
     },
     remove(...values) {
       let changed = false;
@@ -155,6 +156,9 @@ function createFixture({
     },
     querySelectorAll(selector) {
       if (selector.includes('button[class~="bg-token-foreground"]') && composerButtonLabel) return [composerButton];
+      if (selector === ".dream-send-lightning") {
+        return composerButtonClasses.has("dream-send-lightning") ? [composerButton] : [];
+      }
       return [];
     },
   };
@@ -193,7 +197,10 @@ function createFixture({
       listeners: {},
       addEventListener(name, callback) { this.listeners[name] = callback; },
       play() { return Promise.resolve(); },
-      getContext() { return { drawImage() {} }; },
+      getContext() {
+        if (this.id === "codex-dream-skin-motion") motionContextRequests += 1;
+        return { drawImage() {} };
+      },
       classList: makeClassList(),
       parentElement: null,
       textContent: "",
@@ -236,6 +243,7 @@ function createFixture({
       return null;
     },
     querySelectorAll(selector) {
+      fullDocumentScans += 1;
       if (selector.includes('data-app-shell-main-surface')) {
         return hasShell ? [shellMain, ...(secondShellPresent ? [secondShell] : [])] : [];
       }
@@ -300,7 +308,10 @@ function createFixture({
     clearInterval: () => {},
     setTimeout: (callback, delay) => { timeouts.push({ callback, delay }); return timeouts.length; },
     clearTimeout: () => {},
-    getComputedStyle(node) { return { colorScheme: computedColorScheme, display: node?.fixtureDisplay }; },
+    getComputedStyle(node) {
+      if (node === root) rootStyleSamples += 1;
+      return { colorScheme: computedColorScheme, display: node?.fixtureDisplay };
+    },
     innerWidth: 1280,
     innerHeight: 800,
   };
@@ -323,8 +334,13 @@ function createFixture({
     routeClasses,
     utilityClasses,
     composerButtonClasses,
+    get fullDocumentScans() { return fullDocumentScans; },
+    get rootStyleSamples() { return rootStyleSamples; },
+    get motionContextRequests() { return motionContextRequests; },
     setShellPresent(value) { hasShell = value; },
     setSidebarPresent(value) { hasSidebar = value; },
+    setComposerButtonLabel(value) { composerButtonLabel = value; },
+    composer,
     shellMain,
     secondShell,
     showCachedShell(index) { secondShellPresent = true; activeShellIndex = index; },
@@ -366,11 +382,18 @@ const firstState = reinjected.context.window.__CODEX_DREAM_SKIN_STATE__;
 vm.runInNewContext(payload, reinjected.context);
 const secondState = reinjected.context.window.__CODEX_DREAM_SKIN_STATE__;
 assert.notEqual(secondState.installToken, firstState.installToken);
-assert.equal(secondState.artUrl, "blob:fixture-2");
-assert.equal(reinjected.rootStyles.get("--dream-art"), 'url("blob:fixture-2")');
-assert.deepEqual(reinjected.revokedUrls, ["blob:fixture-1"]);
+assert.equal(secondState.artUrl, "blob:fixture-1", "same art keeps the decoded preview blob during hot injection");
+assert.equal(reinjected.rootStyles.get("--dream-art"), 'url("blob:fixture-1")');
+assert.deepEqual(reinjected.revokedUrls, []);
 assert.equal(firstState.cleanup(), false);
 assert.equal(secondState.cleanup(), true);
+assert.deepEqual(reinjected.revokedUrls, ["blob:fixture-1"]);
+
+const replacedArt = createFixture({ shellPresent: true });
+vm.runInNewContext(payload, replacedArt.context);
+vm.runInNewContext(payload.replace("data:image/png;base64,AA==", "data:image/png;base64,AQ=="), replacedArt.context);
+assert.equal(replacedArt.context.window.__CODEX_DREAM_SKIN_STATE__.artUrl, "blob:fixture-2");
+assert.deepEqual(replacedArt.revokedUrls, ["blob:fixture-1"], "changed art releases only the replaced blob");
 
 const auxiliary = createFixture({ shellPresent: false, staleSkin: true });
 const auxiliaryResult = vm.runInNewContext(payload, auxiliary.context);
@@ -430,6 +453,20 @@ assert.equal(configured.utilityClasses.has("dream-home-utility"), false);
 const busyComposer = createFixture({ shellPresent: true, composerButtonLabel: "停止" });
 vm.runInNewContext(configuredPayload, busyComposer.context);
 assert.equal(busyComposer.composerButtonClasses.has("dream-send-lightning"), false);
+busyComposer.setComposerButtonLabel("发送");
+const scansBeforeControls = busyComposer.fullDocumentScans;
+busyComposer.observers[0].callback([{ type: "attributes", attributeName: "aria-label",
+  target: { matches: (selector) => selector.includes("composer-surface-chrome") } }]);
+assert.equal(busyComposer.timeouts.at(-1).delay, 32);
+busyComposer.timeouts.at(-1).callback();
+assert.equal(busyComposer.composerButtonClasses.has("dream-send-lightning"), true);
+busyComposer.setComposerButtonLabel("停止");
+busyComposer.observers[0].callback([{ type: "attributes", attributeName: "aria-label",
+  target: { matches: (selector) => selector.includes("composer-surface-chrome") } }]);
+busyComposer.timeouts.at(-1).callback();
+assert.equal(busyComposer.composerButtonClasses.has("dream-send-lightning"), false);
+assert.equal(busyComposer.fullDocumentScans, scansBeforeControls,
+  "send/stop control changes do not rediscover every cached page");
 
 const clearArt = createFixture({ shellPresent: true });
 vm.runInNewContext(buildPayload({
@@ -533,6 +570,14 @@ nativeObserver.takeRecords();
 nativeComputedDark.context.window.__CODEX_DREAM_SKIN_STATE__.ensure();
 assert.equal(nativeObserver.takeRecords().length, 0,
   "Sampling the native computed color-scheme must not queue a self-triggering root mutation pass.");
+assert.equal(nativeComputedDark.rootStyleSamples, 1,
+  "an unchanged native appearance must not repeatedly remove the skin to sample computed styles");
+nativeComputedDark.context.document.documentElement.className = "light";
+nativeObserver.callback([{ type: "attributes", attributeName: "class",
+  target: nativeComputedDark.context.document.documentElement }]);
+assert.equal(nativeComputedDark.rootClasses.has("dream-theme-light"), true,
+  "appearance caching must still follow a native theme change immediately");
+assert.equal(nativeComputedDark.rootClasses.has("dream-theme-dark"), false);
 
 const metadataWide = createFixture({ shellPresent: true });
 vm.runInNewContext(buildPayload({ artMetadata: { ratio: 16 / 9 } }), metadataWide.context);
@@ -549,7 +594,8 @@ assert.equal(videoElement.muted, true);
 videoElement.listeners.canplay();
 assert.equal(videoMotion.rootClasses.has("dream-motion-ready"), true);
 videoElement.listeners.error();
-assert.equal(videoMotion.rootClasses.has("dream-motion-ready"), false);
+assert.equal(videoMotion.rootClasses.has("dream-motion-ready"), true,
+  "a playback error keeps the last displayed frame while the stream reconnects");
 const retry = videoMotion.timeouts.at(-1);
 assert.equal(retry.delay, 500);
 retry.callback();
@@ -583,22 +629,27 @@ assert.equal(relayedState.acceptMotionFrame("AA==", "4".repeat(16)), false);
 assert.equal(relayedState.acceptMotionFrame("AA==", "3".repeat(16)), true);
 assert.match(relayedElement.__dreamDecoder.url, /^blob:/);
 assert.equal(relayedState.motionFrames, 1);
+relayed.observers[0].takeRecords();
 assert.equal(relayedState.acceptMotionFrame("AQ==", "3".repeat(16)), true);
 assert.equal(relayedState.motionFrames, 2);
+assert.equal(relayed.observers[0].takeRecords().length, 0,
+  "steady playback must not turn every decoded frame into a root class mutation and shell scan");
 assert.equal(relayed.rootClasses.has("dream-motion-ready"), true);
 
 // React can retain both chats and only change their wrapper visibility.
-// A -> B -> A must move the styling without replacing the shared video canvas.
+// A -> B -> A keeps cached styling and the shared video canvas before paint.
 const routeObserver = relayed.observers[0];
 assert.ok(routeObserver.options.attributeFilter.includes("style"));
 assert.ok(routeObserver.options.attributeFilter.includes("hidden"));
 relayed.showCachedShell(1);
 const pendingBefore = relayed.timeouts.length;
 routeObserver.callback([{ attributeName: "style", target: { matches: () => true } }]);
+assert.equal(relayed.secondShell.classList.contains("dream-shell-main"), true,
+  "a newly visible shell receives its skin synchronously, before the next paint");
 routeObserver.callback([{ type: "childList", target: {} }]);
-assert.equal(relayed.timeouts.length, pendingBefore + 1, "streaming mutations must not postpone a route update");
-relayed.timeouts.at(-1).callback();
-assert.equal(relayed.shellMain.classList.contains("dream-shell-main"), false);
+assert.equal(relayed.timeouts.length, pendingBefore, "route changes require no delayed wallpaper reload");
+assert.equal(relayed.shellMain.classList.contains("dream-shell-main"), true,
+  "the cached shell stays styled for its next activation");
 assert.equal(relayed.secondShell.classList.contains("dream-shell-main"), true);
 assert.equal(relayed.nodes.get("codex-dream-skin-motion"), relayedElement);
 assert.equal(relayedState.acceptMotionFrame("Ag==", "3".repeat(16)), true);
@@ -609,14 +660,88 @@ assert.equal(relayed.nodes.get("codex-dream-skin-motion"), relayedElement, "a tr
 relayed.showCachedShell(0);
 relayedState.ensure();
 assert.equal(relayed.shellMain.classList.contains("dream-shell-main"), true);
-assert.equal(relayed.secondShell.classList.contains("dream-shell-main"), false);
+assert.equal(relayed.secondShell.classList.contains("dream-shell-main"), true);
 assert.equal(relayed.nodes.get("codex-dream-skin-motion"), relayedElement);
 assert.equal(relayed.rootClasses.has("dream-motion-ready"), true);
 const afterRoute = relayed.timeouts.length;
 routeObserver.callback([{ attributeName: "style", target: relayed.context.document.documentElement }]);
 assert.equal(relayed.timeouts.length, afterRoute, "palette writes must not trigger route work");
-relayedState.cleanup();
+const scansBeforeStream = relayed.fullDocumentScans;
+const ensuresBeforeStream = relayedState.ensureCount;
+for (let index = 0; index < 100; index += 1) {
+  routeObserver.callback([{ type: "childList", target: {}, addedNodes: [{}] }]);
+  routeObserver.callback([{ type: "attributes", attributeName: "class", target: {} }]);
+}
+assert.equal(relayed.fullDocumentScans, scansBeforeStream,
+  "streamed chat content must not trigger whole-document shell discovery");
+assert.equal(relayedState.ensureCount, ensuresBeforeStream);
+relayed.setShellPresent(false);
+relayedState.ensure();
+assert.equal(relayed.nodes.get("codex-dream-skin-motion"), relayedElement,
+  "remounting the route keeps the last frame even when no shell is temporarily mounted");
+assert.equal(relayed.rootClasses.has("dream-motion-ready"), true);
+relayed.setShellPresent(true);
+
+const decoderBeforeReload = relayedElement.__dreamDecoder;
+vm.runInNewContext(buildPayload({ motion: { kind: "video", revision: "3".repeat(16), transport: "cdp" } })
+  .replace(".fixture { color: blue; }", ".fixture { color: green; }"), relayed.context);
+const renewedState = relayed.context.window.__CODEX_DREAM_SKIN_STATE__;
+assert.equal(relayed.nodes.get("codex-dream-skin-motion"), relayedElement);
+assert.equal(relayedElement.__dreamDecoder, decoderBeforeReload);
+assert.equal(relayed.rootClasses.has("dream-motion-ready"), true);
+assert.equal(relayed.nodes.get("codex-dream-skin-style").textContent, ".fixture { color: green; }",
+  "same-wallpaper hot injection refreshes CSS while preserving the decoded media");
+assert.equal(renewedState.motionFrames, 3);
+assert.equal(relayedState.acceptMotionFrame("Aw==", "3".repeat(16)), false);
+assert.equal(renewedState.acceptMotionFrame("Aw==", "3".repeat(16)), true);
+assert.equal(renewedState.motionFrames, 4, "a retained decoder reports frames to the new owner");
+assert.equal(relayed.motionContextRequests, 1, "frame drawing reuses the canvas context");
+
+vm.runInNewContext(buildPayload({ motion: { kind: "scene", revision: "5".repeat(16), transport: "cdp" } }), relayed.context);
+const replacedState = relayed.context.window.__CODEX_DREAM_SKIN_STATE__;
+assert.notEqual(relayed.nodes.get("codex-dream-skin-motion"), relayedElement,
+  "a changed wallpaper never reuses a media layer from the old source");
+assert.equal(relayedElement.__dreamDisposed, true);
+assert.equal(relayed.rootClasses.has("dream-motion-ready"), false);
+assert.equal(replacedState.acceptMotionFrame("AA==", "3".repeat(16)), false);
+replacedState.cleanup();
 assert.equal(relayed.nodes.has("codex-dream-skin-motion"), false);
 assert.equal(relayedState.acceptMotionFrame("AA==", "3".repeat(16)), false);
+
+const pendingDecode = createFixture({ shellPresent: true });
+const deferredImages = [];
+pendingDecode.context.Image = class {
+  naturalWidth = 320;
+  naturalHeight = 180;
+  constructor() { deferredImages.push(this); }
+  set src(value) { this.url = value; }
+};
+const pendingPayload = buildPayload({ motion: { kind: "scene", revision: "6".repeat(16), transport: "cdp" } });
+vm.runInNewContext(pendingPayload, pendingDecode.context);
+const pendingState = pendingDecode.context.window.__CODEX_DREAM_SKIN_STATE__;
+assert.equal(pendingState.acceptMotionFrame("AA==", "6".repeat(16)), true);
+const pendingElement = pendingDecode.nodes.get("codex-dream-skin-motion");
+const firstDecoder = pendingElement.__dreamDecoder;
+assert.equal(pendingState.acceptMotionFrame("AQ==", "6".repeat(16)), false,
+  "slow decoding drops new frames instead of building a delayed playback queue");
+vm.runInNewContext(pendingPayload, pendingDecode.context);
+const pendingRenewal = pendingDecode.context.window.__CODEX_DREAM_SKIN_STATE__;
+firstDecoder.onload();
+assert.equal(pendingRenewal.motionFrames, 1, "an in-flight frame survives same-wallpaper reinjection");
+assert.equal(pendingState.motionFrames, 0, "retired renderer state receives no new frame statistics");
+assert.equal(pendingDecode.rootClasses.has("dream-motion-ready"), true);
+assert.equal(pendingRenewal.acceptMotionFrame("Ag==", "6".repeat(16)), true);
+assert.equal(pendingElement.__dreamDecoder, firstDecoder, "steady playback reuses the JPEG decoder");
+firstDecoder.onerror();
+assert.equal(pendingElement.__dreamFrameBusy, false);
+assert.equal(pendingRenewal.motionFrames, 1);
+assert.equal(pendingDecode.rootClasses.has("dream-motion-ready"), true,
+  "a failed frame keeps the displayed wallpaper instead of exposing a native surface");
+assert.equal(pendingRenewal.acceptMotionFrame("Aw==", "6".repeat(16)), true);
+const outstandingUrl = pendingElement.__dreamFrameUrl;
+pendingRenewal.cleanup();
+assert.ok(pendingDecode.revokedUrls.includes(outstandingUrl), "explicit disable releases an in-flight frame URL");
+assert.equal(firstDecoder.onload, null);
+assert.equal(firstDecoder.onerror, null);
 
 console.log("PASS: renderer applies adaptive theme metadata and preserves transparent auxiliary windows.");

@@ -28,8 +28,13 @@ namespace CodexDreamSkinController
         private MotionSource source;
         private IntPtr sceneWindow = IntPtr.Zero;
         private uint sceneOwnerPid;
-        private byte[] latestFrame;
-        private int frameVersion;
+        private FrameSnapshot latestFrame;
+        private CaptureBuffer captureBuffer;
+        private readonly CaptureModePolicy captureMode = new CaptureModePolicy();
+        private readonly string frameEpoch = Guid.NewGuid().ToString("N");
+        private long frameSequence;
+        private long captureTicksTotal;
+        internal const int TargetFramesPerSecond = 30;
         private int sceneClients;
         private int dirty = 1;
         private volatile bool shuttingDown;
@@ -104,17 +109,19 @@ namespace CodexDreamSkinController
                     acceptThread.IsBackground = true;
                     acceptThread.Start();
                     DateTime lastParentCheck = DateTime.UtcNow;
-                    DateTime lastCapture = DateTime.MinValue;
+                    long nextCaptureAt = 0;
                     while (true)
                     {
                         if (Interlocked.Exchange(ref dirty, 0) != 0) ReloadSource();
                         MotionSource current = CurrentSource();
-                        if (current != null && (Volatile.Read(ref sceneClients) > 0 || (DateTime.UtcNow - lastFrameRequestUtc).TotalSeconds < 2) &&
-                            (DateTime.UtcNow - lastCapture).TotalMilliseconds >= 95)
+                        bool captureActive = current != null && (Volatile.Read(ref sceneClients) > 0 || (DateTime.UtcNow - lastFrameRequestUtc).TotalSeconds < 2);
+                        long nowTicks = Stopwatch.GetTimestamp();
+                        if (captureActive && nowTicks >= nextCaptureAt)
                         {
+                            long startedAt = nowTicks;
                             EnsureSceneWindow();
                             CaptureSceneFrame();
-                            lastCapture = DateTime.UtcNow;
+                            nextCaptureAt = startedAt + Math.Max(1, Stopwatch.Frequency / TargetFramesPerSecond);
                         }
                         if (sceneWindow != IntPtr.Zero && Volatile.Read(ref sceneClients) == 0 &&
                             (DateTime.UtcNow - lastClientUtc).TotalSeconds > 30) CloseSceneWindow();
@@ -128,7 +135,7 @@ namespace CodexDreamSkinController
                                 else return 0;
                             }
                         }
-                        Thread.Sleep(35);
+                        Thread.Sleep(captureActive ? CaptureDelayMilliseconds(nextCaptureAt, Stopwatch.GetTimestamp()) : 35);
                     }
                 }
                 finally { shuttingDown = true; listener.Stop(); CloseSceneWindow(); }
@@ -179,14 +186,22 @@ namespace CodexDreamSkinController
                         next = new MotionSource { Kind = kind, Path = Path.GetFullPath(path), Properties = PropertiesJson(properties) };
                     }
                 }
-                MotionSource previous = CurrentSource();
-                if (previous != null && (next == null || previous.Kind != next.Kind || previous.Properties != next.Properties || !String.Equals(previous.Path, next.Path, StringComparison.OrdinalIgnoreCase)))
-                    CloseSceneWindow();
-                lock (sourceLock) source = next;
-                if (next != null) service.Log("motion source: " + next.Kind);
+                UpdateValidatedSource(next);
             }
             catch (IOException) { Interlocked.Exchange(ref dirty, 1); }
             catch (Exception error) { service.Log("motion source invalid: " + error.GetType().Name); }
+        }
+
+        // ReloadSource applies the fixed library whitelist and supported-file
+        // checks before this transition. Keeping the transition independent of
+        // file parsing lets its playback/cache behavior be verified in memory.
+        internal void UpdateValidatedSource(MotionSource next)
+        {
+            MotionSource previous = CurrentSource();
+            if (SameSource(previous, next)) return;
+            if (previous != null) CloseSceneWindow();
+            lock (sourceLock) source = next;
+            if (next != null) service.Log("motion source: " + next.Kind);
         }
 
         private void HandleClient(TcpClient client)
@@ -221,9 +236,15 @@ namespace CodexDreamSkinController
                     { Reply(stream, 403, "Forbidden"); return; }
                     if (parts[0] == "OPTIONS" && (route == "/video" || route == "/scene" || route == "/frame"))
                     { ReplyOptions(stream); return; }
+                    if (parts[0] == "GET" && route == "/metrics") { ServeMetrics(stream); return; }
                     MotionSource current = CurrentSource();
                     if (current == null) { Reply(stream, 404, "No active motion theme"); return; }
-                    if (parts[0] == "GET" && route == "/frame") { ServeFrame(stream, current); return; }
+                    if (parts[0] == "GET" && route == "/frame")
+                    {
+                        Match after = Regex.Match(parts[1], @"(?:\?|&)after=([^&]*)(?:&|$)");
+                        if (after.Success && !IsFrameId(after.Groups[1].Value)) { Reply(stream, 400, "Invalid frame identifier"); return; }
+                        ServeFrame(stream, current, after.Success ? after.Groups[1].Value : null); return;
+                    }
                     if ((parts[0] == "GET" || parts[0] == "HEAD") && route == "/video" && current.Kind == "video")
                     { ServeVideo(stream, current, range, parts[0] == "HEAD"); return; }
                     if (parts[0] == "GET" && route == "/scene" && current.Kind != "video")
@@ -285,37 +306,71 @@ namespace CodexDreamSkinController
                     "Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Private-Network: true\r\n" +
                     "Cross-Origin-Resource-Policy: cross-origin\r\nConnection: close\r\n\r\n");
                 stream.Write(prefix, 0, prefix.Length);
-                int sent = -1;
+                string sent = null;
                 while (CurrentSource() == expected)
                 {
-                    int version = Volatile.Read(ref frameVersion);
-                    byte[] frame = latestFrame;
-                    if (frame == null || sent == version) { Thread.Sleep(55); continue; }
+                    FrameSnapshot snapshot = Volatile.Read(ref latestFrame);
+                    if (!UsableFrame(snapshot, expected, sent)) { Thread.Sleep(10); continue; }
+                    byte[] frame = snapshot.Bytes;
                     byte[] header = Encoding.ASCII.GetBytes("--dreamframe\r\nContent-Type: image/jpeg\r\nContent-Length: " + frame.Length + "\r\n\r\n");
+                    if (CurrentSource() != expected) return;
                     stream.Write(header, 0, header.Length);
                     stream.Write(frame, 0, frame.Length);
                     stream.WriteByte(13); stream.WriteByte(10);
-                    sent = version;
+                    sent = snapshot.Id;
                 }
             }
             finally { Interlocked.Decrement(ref sceneClients); lastClientUtc = DateTime.UtcNow; }
         }
 
-        private void ServeFrame(NetworkStream stream, MotionSource expected)
+        private void ServeFrame(NetworkStream stream, MotionSource expected, string after)
         {
             lastFrameRequestUtc = DateTime.UtcNow;
             lastClientUtc = DateTime.UtcNow;
-            DateTime deadline = DateTime.UtcNow.AddSeconds(6);
-            byte[] frame = latestFrame;
-            while (frame == null && CurrentSource() == expected && DateTime.UtcNow < deadline)
+            long firstFrameDeadline = Stopwatch.GetTimestamp() + 6 * Stopwatch.Frequency;
+            long updatedFrameDeadline = 0;
+            FrameSnapshot snapshot;
+            while (true)
             {
-                Thread.Sleep(40);
-                frame = latestFrame;
+                if (shuttingDown || CurrentSource() != expected) { Reply(stream, 404, "Wallpaper frame is not ready"); return; }
+                snapshot = Volatile.Read(ref latestFrame);
+                if (UsableFrame(snapshot, expected, after)) break;
+                long nowTicks = Stopwatch.GetTimestamp();
+                if (snapshot != null && snapshot.Source == expected && snapshot.Id == after)
+                {
+                    if (updatedFrameDeadline == 0) updatedFrameDeadline = nowTicks + Stopwatch.Frequency * 45 / 1000;
+                    if (nowTicks >= updatedFrameDeadline) { ReplyNoContent(stream); return; }
+                    Thread.Sleep(3);
+                }
+                else
+                {
+                    if (nowTicks >= firstFrameDeadline) { Reply(stream, 404, "Wallpaper frame is not ready"); return; }
+                    Thread.Sleep(20);
+                }
             }
-            if (frame == null || CurrentSource() != expected) { Reply(stream, 404, "Wallpaper frame is not ready"); return; }
-            byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nCache-Control: no-store\r\nContent-Length: " + frame.Length + "\r\nConnection: close\r\n\r\n");
+            if (CurrentSource() != expected) { Reply(stream, 404, "Wallpaper frame is not ready"); return; }
+            byte[] frame = snapshot.Bytes;
+            byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nCache-Control: no-store\r\nX-Dream-Frame-Id: " + snapshot.Id + "\r\nContent-Length: " + frame.Length + "\r\nConnection: close\r\n\r\n");
             stream.Write(header, 0, header.Length);
             stream.Write(frame, 0, frame.Length);
+        }
+
+        private void ServeMetrics(NetworkStream stream)
+        {
+            FrameSnapshot snapshot = Volatile.Read(ref latestFrame);
+            byte[] body = Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(new Dictionary<string, object> {
+                { "totalFrames", Interlocked.Read(ref frameSequence) },
+                { "captureMsLast", snapshot == null ? 0 : snapshot.CaptureTicks * 1000.0 / Stopwatch.Frequency },
+                { "captureMsTotal", Interlocked.Read(ref captureTicksTotal) * 1000.0 / Stopwatch.Frequency },
+                { "frameBytes", snapshot == null ? 0 : snapshot.Bytes.Length },
+                { "width", snapshot == null ? 0 : snapshot.Width },
+                { "height", snapshot == null ? 0 : snapshot.Height },
+                { "captureMode", snapshot == null ? "none" : snapshot.ClientArea ? "client" : "window" },
+                { "targetFps", TargetFramesPerSecond }
+            }));
+            byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n");
+            stream.Write(header, 0, header.Length);
+            stream.Write(body, 0, body.Length);
         }
 
         private void EnsureSceneWindow()
@@ -353,6 +408,7 @@ namespace CodexDreamSkinController
                         }
                         sceneWindow = candidate;
                         sceneOwnerPid = pid;
+                        captureMode.Reset();
                         if (!ParkSceneWindow())
                         {
                             service.Log("wallpaper capture window could not be isolated; closing it");
@@ -377,34 +433,56 @@ namespace CodexDreamSkinController
             if (sceneWindow == IntPtr.Zero || !IsWindow(sceneWindow)) return;
             if (!ParkSceneWindow()) { CloseSceneWindow(); return; }
             if ((DateTime.UtcNow - sceneOpenedUtc).TotalMilliseconds < 500) return;
-            RECT rectangle;
-            if (!GetWindowRect(sceneWindow, out rectangle)) return;
+            MotionSource expected = CurrentSource();
+            if (expected == null) return;
+            RECT rectangle = new RECT();
+            bool clientOnly = captureMode.PreferClient(sceneWindow) && GetClientRect(sceneWindow, out rectangle);
+            if (!clientOnly && !GetWindowRect(sceneWindow, out rectangle)) return;
             int width = rectangle.Right - rectangle.Left;
             int height = rectangle.Bottom - rectangle.Top;
             if (width < 160 || height < 90 || width > 3840 || height > 2160) return;
-            using (Bitmap bitmap = new Bitmap(width, height))
-            using (Graphics graphics = Graphics.FromImage(bitmap))
+            long startedAt = Stopwatch.GetTimestamp();
+            if (captureBuffer == null) captureBuffer = new CaptureBuffer();
+            captureBuffer.EnsureDimensions(width, height);
+            if (!PrintCapture(clientOnly ? 3U : 2U))
             {
-                IntPtr dc = graphics.GetHdc();
-                bool captured;
-                try { captured = PrintWindow(sceneWindow, dc, 2); }
-                finally { graphics.ReleaseHdc(dc); }
-                if (!captured) return;
-                using (MemoryStream memory = new MemoryStream())
-                {
-                    bitmap.Save(memory, ImageFormat.Jpeg);
-                    latestFrame = memory.ToArray();
-                    Interlocked.Increment(ref frameVersion);
-                }
+                // Some Wallpaper Engine renderers do not support client-only
+                // capture. Remember this for the window so steady frames do
+                // not repeatedly allocate client and full-window buffers.
+                if (!clientOnly) return;
+                captureMode.ClientUnsupported(sceneWindow);
+                clientOnly = false;
+                if (!GetWindowRect(sceneWindow, out rectangle)) return;
+                width = rectangle.Right - rectangle.Left;
+                height = rectangle.Bottom - rectangle.Top;
+                if (width < 160 || height < 90 || width > 3840 || height > 2160) return;
+                captureBuffer.EnsureDimensions(width, height);
+                if (!PrintCapture(2U)) return;
             }
+            byte[] bytes = captureBuffer.EncodeJpeg();
+            long elapsedTicks = Stopwatch.GetTimestamp() - startedAt;
+            if (CurrentSource() != expected) return;
+            long sequence = Interlocked.Increment(ref frameSequence);
+            Interlocked.Add(ref captureTicksTotal, elapsedTicks);
+            Volatile.Write(ref latestFrame, new FrameSnapshot(bytes, frameEpoch + "-" + sequence.ToString(CultureInfo.InvariantCulture), expected,
+                width, height, Stopwatch.GetTimestamp(), elapsedTicks, clientOnly));
+        }
+
+        private bool PrintCapture(uint flags)
+        {
+            IntPtr dc = captureBuffer.Graphics.GetHdc();
+            try { return PrintWindow(sceneWindow, dc, flags); }
+            finally { captureBuffer.Graphics.ReleaseHdc(dc); }
         }
 
         private void CloseSceneWindow()
         {
+            captureMode.Reset();
+            Volatile.Write(ref latestFrame, null);
+            if (captureBuffer != null) { captureBuffer.Dispose(); captureBuffer = null; }
             if (sceneWindow == IntPtr.Zero) return;
             sceneWindow = IntPtr.Zero;
             sceneOwnerPid = 0;
-            latestFrame = null;
             if (!File.Exists(WallpaperCatalog.EngineExecutable)) return;
             try
             {
@@ -467,11 +545,17 @@ namespace CodexDreamSkinController
         private static void Reply(NetworkStream stream, int status, string message)
         {
             byte[] body = Encoding.UTF8.GetBytes(message);
-            string label = status == 200 ? "OK" : status == 403 ? "Forbidden" : status == 416 ? "Range Not Satisfiable" : "Not Found";
+            string label = status == 200 ? "OK" : status == 400 ? "Bad Request" : status == 403 ? "Forbidden" : status == 416 ? "Range Not Satisfiable" : "Not Found";
             byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 " + status + " " + label + "\r\n" +
                 "Content-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n");
             stream.Write(header, 0, header.Length);
             stream.Write(body, 0, body.Length);
+        }
+
+        private static void ReplyNoContent(NetworkStream stream)
+        {
+            byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 204 No Content\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            stream.Write(header, 0, header.Length);
         }
 
         private static void ReplyOptions(NetworkStream stream)
@@ -485,7 +569,7 @@ namespace CodexDreamSkinController
 
         internal static string PropertiesJson(Dictionary<string, object> preset)
         {
-            var properties = new Dictionary<string, object>();
+            var properties = new SortedDictionary<string, object>(StringComparer.Ordinal);
             if (preset != null)
                 foreach (var entry in preset)
                     if (entry.Value != null && !(entry.Value is Dictionary<string, object>) && !(entry.Value is object[]))
@@ -505,11 +589,105 @@ namespace CodexDreamSkinController
                 throw new InvalidOperationException("Could not isolate the local media socket: " + Marshal.GetLastWin32Error());
         }
 
-        private sealed class MotionSource { public string Kind; public string Path; public string Properties; }
+        internal static int CaptureDelayMilliseconds(long nextCaptureAt, long nowTicks)
+        {
+            return (int)Math.Min(35, Math.Max(0, Math.Ceiling((nextCaptureAt - nowTicks) * 1000.0 / Stopwatch.Frequency)));
+        }
+
+        internal static bool SameSource(MotionSource previous, MotionSource next)
+        {
+            return ReferenceEquals(previous, next) || previous != null && next != null &&
+                previous.Kind == next.Kind && previous.Properties == next.Properties &&
+                String.Equals(previous.Path, next.Path, StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static bool IsFrameId(string value) { return value != null && Regex.IsMatch(value, "^[a-f0-9]{32}-[1-9][0-9]{0,18}$"); }
+
+        internal static bool UsableFrame(FrameSnapshot frame, MotionSource expected, string after)
+        {
+            return frame != null && frame.Source == expected && frame.Id != after;
+        }
+
+        internal sealed class MotionSource { public string Kind; public string Path; public string Properties; }
+
+        internal sealed class FrameSnapshot
+        {
+            internal readonly byte[] Bytes;
+            internal readonly string Id;
+            internal readonly MotionSource Source;
+            internal readonly int Width, Height;
+            internal readonly long CapturedAtTicks, CaptureTicks;
+            internal readonly bool ClientArea;
+            internal FrameSnapshot(byte[] bytes, string id, MotionSource source, int width, int height, long capturedAtTicks, long captureTicks, bool clientArea = false)
+            {
+                Bytes = bytes; Id = id; Source = source; Width = width; Height = height;
+                CapturedAtTicks = capturedAtTicks; CaptureTicks = captureTicks;
+                ClientArea = clientArea;
+            }
+        }
+
+        internal sealed class CaptureModePolicy
+        {
+            private IntPtr unsupportedWindow;
+            internal bool PreferClient(IntPtr window) { return window != IntPtr.Zero && window != unsupportedWindow; }
+            internal void ClientUnsupported(IntPtr window) { unsupportedWindow = window; }
+            internal void Reset() { unsupportedWindow = IntPtr.Zero; }
+        }
+
+        internal sealed class CaptureBuffer : IDisposable
+        {
+            internal Bitmap Bitmap { get; private set; }
+            internal Graphics Graphics { get; private set; }
+            private readonly MemoryStream memory = new MemoryStream(512 * 1024);
+            private readonly ImageCodecInfo jpegCodec;
+            private readonly EncoderParameters encoderParameters;
+            private bool disposed;
+
+            internal CaptureBuffer()
+            {
+                foreach (ImageCodecInfo codec in ImageCodecInfo.GetImageEncoders())
+                    if (codec.FormatID == ImageFormat.Jpeg.Guid) { jpegCodec = codec; break; }
+                if (jpegCodec == null) throw new InvalidOperationException("JPEG encoder is unavailable");
+                encoderParameters = new EncoderParameters(1);
+                encoderParameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 82L);
+            }
+
+            internal void EnsureDimensions(int width, int height)
+            {
+                if (disposed) throw new ObjectDisposedException("CaptureBuffer");
+                if (Bitmap != null && Bitmap.Width == width && Bitmap.Height == height) return;
+                if (Graphics != null) Graphics.Dispose();
+                if (Bitmap != null) Bitmap.Dispose();
+                Bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+                Graphics = System.Drawing.Graphics.FromImage(Bitmap);
+            }
+
+            internal byte[] EncodeJpeg()
+            {
+                if (disposed) throw new ObjectDisposedException("CaptureBuffer");
+                if (Bitmap == null) throw new InvalidOperationException("Capture dimensions have not been configured");
+                memory.Position = 0;
+                memory.SetLength(0);
+                Bitmap.Save(memory, jpegCodec, encoderParameters);
+                return memory.ToArray();
+            }
+
+            public void Dispose()
+            {
+                if (disposed) return;
+                disposed = true;
+                if (Graphics != null) Graphics.Dispose();
+                if (Bitmap != null) Bitmap.Dispose();
+                Graphics = null; Bitmap = null;
+                encoderParameters.Dispose();
+                memory.Dispose();
+            }
+        }
         [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
         [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
+        [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out RECT rectangle);
         [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
         [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr window, IntPtr deviceContext, uint flags);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string className, string windowName);

@@ -113,6 +113,81 @@ internal static class ControllerBehaviorTests
         bool missingDesktopRejected=false;
         try { MotionHost.CaptureParkingPoint(Rectangle.Empty); } catch(InvalidOperationException) { missingDesktopRejected=true; }
         Check(missingDesktopRejected,"missing display geometry never falls back to visible screen coordinates");
+        long framePeriod = Stopwatch.Frequency / MotionHost.TargetFramesPerSecond;
+        Check(MotionHost.CaptureDelayMilliseconds(framePeriod, Stopwatch.Frequency / 100) >= 23 &&
+            MotionHost.CaptureDelayMilliseconds(framePeriod, Stopwatch.Frequency / 100) <= 24,
+            "capture work consumes the frame period instead of adding a full delay after every frame");
+        Check(MotionHost.CaptureDelayMilliseconds(framePeriod, framePeriod * 2) == 0,
+            "a slow capture starts the next frame without an additional pacing stall");
+        var buffer = new MotionHost.CaptureBuffer();
+        buffer.EnsureDimensions(160,90);
+        var bitmapBefore = buffer.Bitmap; var graphicsBefore = buffer.Graphics;
+        buffer.Graphics.Clear(Color.Red);
+        byte[] firstJpeg = buffer.EncodeJpeg();
+        buffer.EnsureDimensions(160,90);
+        buffer.Graphics.Clear(Color.Blue);
+        byte[] secondJpeg = buffer.EncodeJpeg();
+        Check(ReferenceEquals(bitmapBefore,buffer.Bitmap) && ReferenceEquals(graphicsBefore,buffer.Graphics),
+            "steady capture dimensions reuse the GDI bitmap and graphics objects");
+        using(var firstMemory=new MemoryStream(firstJpeg))
+        using(var firstImage=new Bitmap(firstMemory))
+        using(var secondMemory=new MemoryStream(secondJpeg))
+        using(var secondImage=new Bitmap(secondMemory)) {
+            Check(firstImage.Width==160 && firstImage.Height==90 && firstImage.GetPixel(80,45).R>200 && secondImage.GetPixel(80,45).B>200,
+                "published JPEG bytes retain their pixels after the reusable encoder captures a later frame");
+        }
+        buffer.EnsureDimensions(320,180);
+        Check(!ReferenceEquals(bitmapBefore,buffer.Bitmap) && buffer.Bitmap.Width==320 && buffer.Bitmap.Height==180,
+            "a resized capture receives a new buffer with matching dimensions");
+        buffer.Dispose(); buffer.Dispose();
+        bool disposedBufferRejected=false;
+        try { buffer.EnsureDimensions(160,90); } catch(ObjectDisposedException) { disposedBufferRejected=true; }
+        Check(disposedBufferRejected && buffer.Bitmap==null && buffer.Graphics==null,
+            "closing capture releases reusable resources and cannot revive a disposed buffer");
+        var capturePolicy = new MotionHost.CaptureModePolicy();
+        var firstWindow = new IntPtr(1234); var replacementWindow = new IntPtr(1235);
+        Check(capturePolicy.PreferClient(firstWindow),"a new capture window gets one client-only capability attempt");
+        capturePolicy.ClientUnsupported(firstWindow);
+        Check(!capturePolicy.PreferClient(firstWindow) && capturePolicy.PreferClient(replacementWindow),
+            "a failed client capture is cached for its window while a different window can try client capture");
+        using(var fallbackBuffer = new MotionHost.CaptureBuffer()) {
+            fallbackBuffer.EnsureDimensions(176,129);
+            var fallbackBitmap = fallbackBuffer.Bitmap; var fallbackGraphics = fallbackBuffer.Graphics;
+            for(int index=0;index<20;index++) fallbackBuffer.EnsureDimensions(capturePolicy.PreferClient(firstWindow)?160:176,capturePolicy.PreferClient(firstWindow)?90:129);
+            Check(ReferenceEquals(fallbackBitmap,fallbackBuffer.Bitmap) && ReferenceEquals(fallbackGraphics,fallbackBuffer.Graphics),
+                "cached full-window capture keeps the same GDI resources on all subsequent frames");
+        }
+        capturePolicy.Reset();
+        Check(capturePolicy.PreferClient(firstWindow),"window closure resets an unsupported client-capture decision even when a handle is reused");
+        var mediaService=NewService("media-protocol");
+        File.WriteAllText(Path.Combine(mediaService.WallpaperControlRoot,"motion-token.txt"),new string('a',64));
+        var mediaHost=(MotionHost)typeof(MotionHost).GetConstructor(BindingFlags.NonPublic|BindingFlags.Instance,null,new []{typeof(ControllerService)},null).Invoke(new object[]{mediaService});
+        var mediaSource=new MotionHost.MotionSource {Kind="scene",Path="F:\\test-wallpaper\\project.json",Properties=MotionHost.PropertiesJson(null)};
+        var identicalSource=new MotionHost.MotionSource {Kind="scene",Path="f:\\TEST-wallpaper\\project.json",Properties=MotionHost.PropertiesJson(null)};
+        Check(MotionHost.SameSource(mediaSource,identicalSource) && !MotionHost.SameSource(mediaSource,new MotionHost.MotionSource {Kind="scene",Path=mediaSource.Path,Properties="changed"}),
+            "unchanged source identity survives theme refresh while changed preset properties require replacement");
+        string frameId=Guid.NewGuid().ToString("N")+"-1";
+        var snapshot=new MotionHost.FrameSnapshot(firstJpeg,frameId,mediaSource,160,90,Stopwatch.GetTimestamp(),Stopwatch.Frequency/100);
+        Check(MotionHost.UsableFrame(snapshot,mediaSource,null) && !MotionHost.UsableFrame(snapshot,identicalSource,null) && !MotionHost.UsableFrame(snapshot,mediaSource,frameId),
+            "frame selection rejects retired sources and an already received frame identifier");
+        typeof(MotionHost).GetField("source",BindingFlags.NonPublic|BindingFlags.Instance).SetValue(mediaHost,mediaSource);
+        typeof(MotionHost).GetField("latestFrame",BindingFlags.NonPublic|BindingFlags.Instance).SetValue(mediaHost,snapshot);
+        byte[] frameReply=MediaRequest(mediaHost,"/frame?t="+new string('a',64));
+        string frameReplyText=System.Text.Encoding.ASCII.GetString(frameReply);
+        Check(frameReplyText.StartsWith("HTTP/1.1 200 OK") && frameReplyText.Contains("X-Dream-Frame-Id: "+frameId) && frameReply.Skip(frameReply.Length-firstJpeg.Length).SequenceEqual(firstJpeg),
+            "frame responses publish the identifier and JPEG bytes from the same snapshot");
+        var watch = Stopwatch.StartNew();
+        string unchangedReply=System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/frame?t="+new string('a',64)+"&after="+frameId));
+        Check(unchangedReply.StartsWith("HTTP/1.1 204 No Content") && watch.Elapsed.TotalMilliseconds<500,
+            "polling an unchanged frame returns a short no-content response instead of resending the JPEG");
+        string badFrameReply=System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/frame?t="+new string('a',64)+"&after=bad"));
+        Check(badFrameReply.StartsWith("HTTP/1.1 400 Bad Request"),"invalid frame identifiers cannot enter the response headers");
+        string healthReply=System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/health"));
+        Check(healthReply.EndsWith("codex-dream-skin-motion/1"),"the existing media health response remains unchanged");
+        string rejectedMetrics=System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/metrics"));
+        string metricsReply=System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/metrics?t="+new string('a',64)));
+        Check(rejectedMetrics.StartsWith("HTTP/1.1 403 Forbidden") && metricsReply.Contains("\"captureMsLast\":10") && metricsReply.Contains("\"width\":160") && metricsReply.Contains("\"captureMode\":\"window\"") && !metricsReply.Contains(mediaSource.Path) && !metricsReply.Contains(new string('a',64)),
+            "performance metrics require the local token and expose numeric diagnostics without source paths or credentials");
         var processProbe=new ProcessProbeService(Path.Combine(root,"process-probe"));
         var isolatedListener=new TcpListener(IPAddress.Loopback,0);
         isolatedListener.Start();
@@ -129,7 +204,7 @@ internal static class ControllerBehaviorTests
         string pipeScript=Path.Combine(root,"inherited-pipes.ps1");
         string testExe=Process.GetCurrentProcess().MainModule.FileName.Replace("'","''");
         File.WriteAllText(pipeScript,"$i=New-Object Diagnostics.ProcessStartInfo\r\n$i.FileName='"+testExe+"'\r\n$i.Arguments='--hold-pipes'\r\n$i.UseShellExecute=$false\r\n$i.CreateNoWindow=$true\r\n$i.WindowStyle='Hidden'\r\n$p=[Diagnostics.Process]::Start($i)\r\nWrite-Output 'pipe-marker'\r\nexit 0\r\n");
-        var watch=Stopwatch.StartNew();
+        watch=Stopwatch.StartNew();
         var pipeResult=processProbe.Invoke(pipeScript);
         Check(pipeResult.ExitCode==0 && pipeResult.Output.Contains("pipe-marker") && watch.Elapsed.TotalSeconds<8,
             "command returns after its script exits even if a background GUI holds stdout open");
@@ -242,6 +317,20 @@ internal static class ControllerBehaviorTests
         Check(!unavailableWallpaper.ApplyTheme(missingPreset,false).Success && unavailableWallpaper.Calls.Count==0,
             "unavailable wallpaper entries remain visible without launching an unsupported source");
         var currentVideo=wallpapers.First(x=>x.MediaKind=="video");
+        var sourceField=typeof(MotionHost).GetField("source",BindingFlags.NonPublic|BindingFlags.Instance);
+        var snapshotField=typeof(MotionHost).GetField("latestFrame",BindingFlags.NonPublic|BindingFlags.Instance);
+        var loadedSource=new MotionHost.MotionSource {Kind="video",Path="F:\\test-wallpaper\\test.mp4",Properties=MotionHost.PropertiesJson(new Dictionary<string,object>{{"speed",1},{"brightness",100}})};
+        mediaHost.UpdateValidatedSource(loadedSource);
+        var retainedSnapshot=new MotionHost.FrameSnapshot(firstJpeg,frameId,loadedSource,160,90,Stopwatch.GetTimestamp(),1);
+        snapshotField.SetValue(mediaHost,retainedSnapshot);
+        var retainedPolicy=(MotionHost.CaptureModePolicy)typeof(MotionHost).GetField("captureMode",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(mediaHost);
+        retainedPolicy.ClientUnsupported(firstWindow);
+        mediaHost.UpdateValidatedSource(new MotionHost.MotionSource {Kind="video",Path=loadedSource.Path,Properties=MotionHost.PropertiesJson(new Dictionary<string,object>{{"brightness",100},{"speed",1}})});
+        Check(loadedSource!=null && ReferenceEquals(sourceField.GetValue(mediaHost),loadedSource) && ReferenceEquals(snapshotField.GetValue(mediaHost),retainedSnapshot) && !retainedPolicy.PreferClient(firstWindow),
+            "reloading equivalent source properties preserves the playing source and its already captured frame");
+        mediaHost.UpdateValidatedSource(new MotionHost.MotionSource {Kind="video",Path=loadedSource.Path,Properties=MotionHost.PropertiesJson(new Dictionary<string,object>{{"speed",2},{"brightness",100}})});
+        Check(!ReferenceEquals(sourceField.GetValue(mediaHost),loadedSource) && snapshotField.GetValue(mediaHost)==null && retainedPolicy.PreferClient(firstWindow),
+            "a real source property change invalidates the previous frame before the replacement can be served");
         var config=new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new Dictionary<string,object>{
             {"test-user",new {general=new {wallpaperconfig=new {selectedwallpapers=new {Monitor0=new {file=currentVideo.MediaPath}}}}}}
         });
@@ -289,6 +378,27 @@ internal static class ControllerBehaviorTests
         }
         Console.WriteLine("Passed " + count + " behavioral checks; no live Codex process was changed.");
         return 0;
+    }
+    static byte[] MediaRequest(MotionHost host,string path) {
+        var listener=new TcpListener(IPAddress.Loopback,0); listener.Start();
+        try {
+            var handler=Task.Run(()=>{
+                using(var accepted=listener.AcceptTcpClient())
+                    typeof(MotionHost).GetMethod("HandleClient",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(host,new object[]{accepted});
+            });
+            using(var client=new TcpClient()) {
+                client.ReceiveTimeout=2000;
+                client.Connect(IPAddress.Loopback,((IPEndPoint)listener.LocalEndpoint).Port);
+                var stream=client.GetStream();
+                byte[] request=System.Text.Encoding.ASCII.GetBytes("GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:47866\r\nConnection: close\r\n\r\n");
+                stream.Write(request,0,request.Length);
+                using(var response=new MemoryStream()) {
+                    stream.CopyTo(response);
+                    handler.GetAwaiter().GetResult();
+                    return response.ToArray();
+                }
+            }
+        } finally { listener.Stop(); }
     }
 }
 

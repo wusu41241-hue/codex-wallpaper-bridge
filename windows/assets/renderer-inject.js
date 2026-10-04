@@ -148,31 +148,44 @@
   };
 
   const previous = window[STATE_KEY];
+  const config = normalizeConfig(rawConfig);
+  const sameMotion = Boolean(previous?.config?.motion && config.motion &&
+    ["kind", "transport", "revision", "token"].every((key) =>
+      previous.config.motion[key] === config.motion[key]));
+  const reuseArt = previous?.artSource === artDataUrl && previous.artUrl;
+  const reuseFullscreenArt = previous?.fullscreenArtSource === fullscreenArtDataUrl && previous.fullscreenArtUrl;
   if (previous?.observer) previous.observer.disconnect();
   if (previous?.timer) clearInterval(previous.timer);
   if (previous?.scheduler?.timeout) clearTimeout(previous.scheduler.timeout);
-  if (previous?.artUrl) URL.revokeObjectURL(previous.artUrl);
-  if (previous?.fullscreenArtUrl) URL.revokeObjectURL(previous.fullscreenArtUrl);
-  releaseMotion(document.getElementById(MOTION_ID));
+  if (previous?.artUrl && !reuseArt) URL.revokeObjectURL(previous.artUrl);
+  if (previous?.fullscreenArtUrl && !reuseFullscreenArt) URL.revokeObjectURL(previous.fullscreenArtUrl);
+  // Reloading the injector or changing routes must not erase a decoded frame.
+  // A different wallpaper still owns a new media layer and cannot accept old frames.
+  if (!sameMotion) releaseMotion(document.getElementById(MOTION_ID));
   const createArtUrl = (dataUrl) => {
     if (!dataUrl) return null;
     const comma = dataUrl.indexOf(",");
-    const binary = atob(dataUrl.slice(comma + 1));
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    const base64 = dataUrl.slice(comma + 1);
+    let bytes;
+    if (typeof Uint8Array.fromBase64 === "function") {
+      bytes = Uint8Array.fromBase64(base64);
+    } else {
+      const binary = atob(base64);
+      bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    }
     const mime = /^data:([^;,]+)/.exec(dataUrl)?.[1] || "image/png";
     return URL.createObjectURL(new Blob([bytes], { type: mime }));
   };
-  const artUrl = createArtUrl(artDataUrl);
-  const fullscreenArtUrl = createArtUrl(fullscreenArtDataUrl);
-  const config = normalizeConfig(rawConfig);
-  let profile = {
+  const artUrl = reuseArt || createArtUrl(artDataUrl);
+  const fullscreenArtUrl = reuseFullscreenArt || createArtUrl(fullscreenArtDataUrl);
+  let profile = reuseArt && previous?.profileAnalyzed ? previous.profile : {
     ...defaultProfile,
     aspect: config.initialAspect ?? defaultProfile.aspect,
   };
   const existingStyle = document.getElementById(STYLE_ID);
   if (existingStyle) {
-    existingStyle.textContent = compatibleCssText;
+    if (existingStyle.textContent !== compatibleCssText) existingStyle.textContent = compatibleCssText;
     existingStyle.dataset.dreamVersion = "4";
   }
 
@@ -302,9 +315,7 @@
     const body = document.body;
     const classes = `${root?.className || ""} ${body?.className || ""}`
       .toLowerCase()
-      .replace(/\bdream-theme-(?:dark|light)\b/g, "");
-    if (/\b(dark|electron-dark|theme-dark|appearance-dark)\b/.test(classes)) return "dark";
-    if (/\b(light|electron-light|theme-light|appearance-light)\b/.test(classes)) return "light";
+      .split(/\s+/).filter((name) => !ROOT_CLASSES.includes(name)).join(" ");
 
     const dataTheme = (
       root?.getAttribute?.("data-theme") ||
@@ -314,8 +325,18 @@
       body?.getAttribute?.("data-appearance") ||
       ""
     ).toLowerCase();
-    if (dataTheme.includes("dark")) return "dark";
-    if (dataTheme.includes("light")) return "light";
+    const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+    const key = `${classes}|${dataTheme}|${systemDark}`;
+    if (key === nativeAppearanceKey && nativeAppearance) return nativeAppearance;
+    const remember = (appearance) => {
+      nativeAppearanceKey = key;
+      nativeAppearance = appearance;
+      return appearance;
+    };
+    if (/\b(dark|electron-dark|theme-dark|appearance-dark)\b/.test(classes)) return remember("dark");
+    if (/\b(light|electron-light|theme-light|appearance-light)\b/.test(classes)) return remember("light");
+    if (dataTheme.includes("dark")) return remember("dark");
+    if (dataTheme.includes("light")) return remember("light");
 
     try {
       const hadSkin = root?.classList?.contains?.("codex-dream-skin");
@@ -326,8 +347,8 @@
       if (hadSkin) root.classList.remove(...ROOT_CLASSES);
       try {
         const colorScheme = getComputedStyle(root).colorScheme || "";
-        if (colorScheme.includes("dark") && !colorScheme.includes("light")) return "dark";
-        if (colorScheme.includes("light") && !colorScheme.includes("dark")) return "light";
+        if (colorScheme.includes("dark") && !colorScheme.includes("light")) return remember("dark");
+        if (colorScheme.includes("light") && !colorScheme.includes("dark")) return remember("light");
       } finally {
         if (hadSkin) root.classList.add(...savedSkinClasses);
         observer?.takeRecords?.();
@@ -337,12 +358,14 @@
       samplingNativeShell = false;
     }
     try {
-      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      return remember(systemDark ? "dark" : "light");
     } catch {}
-    return "light";
+    return remember("light");
   };
 
   const clearSkinDom = () => {
+    lastProfileKey = null;
+    activeShell = null;
     const root = document.documentElement;
     root?.classList.remove(...ROOT_CLASSES);
     for (const property of ROOT_PROPERTIES) root?.style.removeProperty(property);
@@ -360,6 +383,12 @@
     document.getElementById(CHROME_ID)?.remove();
     releaseMotion(document.getElementById(MOTION_ID));
   };
+  let nativeAppearanceKey = null;
+  let nativeAppearance = null;
+  let lastProfileKey = null;
+  let profileRevision = 0;
+  let shellEverFound = Boolean(previous?.shellEverFound);
+  let activeShell = null;
 
   const ensureMotion = (root) => {
     const motion = config.motion;
@@ -373,28 +402,13 @@
     const tag = motion.transport === "cdp" ? "CANVAS" : video ? "VIDEO" : "IMG";
     if (element && element.tagName !== tag) { releaseMotion(element); element = null; }
     if (!element) {
+      root.classList.remove("dream-motion-ready");
       element = document.createElement(tag.toLowerCase());
       element.id = MOTION_ID;
       element.className = "dream-motion-media";
       element.setAttribute("aria-hidden", "true");
       element.style.pointerEvents = "none";
       const current = () => !element.__dreamDisposed && document.getElementById(MOTION_ID) === element && !window.__CODEX_DREAM_SKIN_DISABLED__;
-      const ready = () => {
-        if (!current()) return;
-        element.dataset.motionState = "ready";
-        root.classList.add("dream-motion-ready");
-        if (motion.transport === "cdp") {
-          element.__dreamFrameBusy = false;
-          if (element.__dreamPreviousFrameUrl) URL.revokeObjectURL(element.__dreamPreviousFrameUrl);
-          element.__dreamPreviousFrameUrl = null;
-          const state = window[STATE_KEY];
-          if (state?.installToken === installToken) {
-            state.motionFrames = (state.motionFrames || 0) + 1;
-            state.lastMotionAt = Date.now();
-          }
-        }
-      };
-      element.__dreamMarkReady = ready;
       let attempts = 0;
       const reload = () => {
         if (!current()) return;
@@ -404,7 +418,7 @@
       };
       const failed = () => {
         if (!current()) return;
-        root.classList.remove("dream-motion-ready");
+        if (!element.__dreamHasFrame) root.classList.remove("dream-motion-ready");
         element.dataset.motionState = "error";
         if (motion.transport === "cdp") { element.__dreamFrameBusy = false; return; }
         if (element.__dreamRetry || attempts >= 5) return;
@@ -414,7 +428,7 @@
           reload();
         }, 500 * (2 ** attempts));
       };
-      element.addEventListener(video ? "canplay" : "load", ready);
+      element.addEventListener(video ? "canplay" : "load", () => element.__dreamMarkReady?.());
       element.addEventListener("error", failed);
       if (video) {
         element.autoplay = true;
@@ -424,6 +438,24 @@
       }
       document.body.insertBefore(element, document.body.firstChild);
       if (motion.transport !== "cdp") reload();
+    }
+    if (element.__dreamOwner !== installToken) {
+      element.__dreamOwner = installToken;
+      element.__dreamMarkReady = () => {
+        if (element.__dreamDisposed || document.getElementById(MOTION_ID) !== element ||
+            window.__CODEX_DREAM_SKIN_DISABLED__) return;
+        element.__dreamHasFrame = true;
+        if (element.dataset.motionState !== "ready") element.dataset.motionState = "ready";
+        if (!root.classList.contains("dream-motion-ready")) root.classList.add("dream-motion-ready");
+        const state = window[STATE_KEY];
+        if (motion.transport === "cdp" && state?.installToken === installToken) {
+          state.motionFrames = (state.motionFrames || 0) + 1;
+          state.lastMotionAt = Date.now();
+        }
+      };
+    }
+    if (element.__dreamHasFrame && !root.classList.contains("dream-motion-ready")) {
+      root.classList.add("dream-motion-ready");
     }
   };
 
@@ -438,7 +470,7 @@
       const url = createArtUrl("data:image/jpeg;base64," + base64);
       element.__dreamFrameUrl = url;
       element.__dreamFrameBusy = true;
-      const decoder = new Image();
+      const decoder = element.__dreamDecoder || new Image();
       element.__dreamDecoder = decoder;
       const finish = () => {
         URL.revokeObjectURL(url);
@@ -450,7 +482,8 @@
           if (element.__dreamDisposed || document.getElementById(MOTION_ID) !== element) return;
           if (element.width !== decoder.naturalWidth) element.width = decoder.naturalWidth;
           if (element.height !== decoder.naturalHeight) element.height = decoder.naturalHeight;
-          const context = element.getContext("2d", { alpha: false, desynchronized: true });
+          const context = element.__dreamContext ||
+            (element.__dreamContext = element.getContext("2d", { alpha: false, desynchronized: true }));
           context.drawImage(decoder, 0, 0, element.width, element.height);
           element.__dreamMarkReady();
         } catch { } finally { finish(); }
@@ -472,6 +505,9 @@
     const focusY = useFullscreenArt ? (config.fullscreen.focusY ?? profile.focusY) : (config.focusY ?? profile.focusY);
     const activeAspect = useFullscreenArt ? (config.fullscreen.aspect ?? profile.aspect) : profile.aspect;
     const appearance = config.appearance === "auto" ? detectShellAppearance() : config.appearance;
+    const profileKey = `${appearance}|${fullscreenMode}|${profileRevision}`;
+    if (lastProfileKey === profileKey) return;
+    lastProfileKey = profileKey;
     const focus = focusX < .4 ? "left" : focusX > .6 ? "right" : "center";
     const safeArea = config.safeArea === "auto" ? (profile.safeArea ||
       (focus === "left" ? "right" : focus === "right" ? "left" : "center")) : config.safeArea;
@@ -567,19 +603,17 @@
       [COMPOSER_CLASS, composer],
     ];
     for (const [className, activeNode] of assignments) {
-      for (const node of document.querySelectorAll(`.${className}`)) {
-        if (node !== activeNode) node.classList.remove(className);
-      }
+      // Cached pages can become visible before another observer pass. Keep the
+      // compatibility marker on each known shell until explicit skin cleanup.
       activeNode?.classList?.add(className);
     }
   };
 
   const decorateControls = (composer) => {
-    const existing = document.querySelectorAll(`.${SEND_LIGHTNING_CLASS}`);
-    for (const button of existing) button.classList.remove(SEND_LIGHTNING_CLASS);
-    if (config.controlProfile !== "railgun") return;
     if (!composer) return;
-    const candidates = composer.querySelectorAll('button[class~="bg-token-foreground"], button[type="submit"]');
+    const eligible = new Set();
+    const candidates = config.controlProfile === "railgun"
+      ? composer.querySelectorAll('button[class~="bg-token-foreground"], button[type="submit"]') : [];
     for (const button of candidates) {
       const identity = [
         button.getAttribute?.("aria-label"),
@@ -589,14 +623,20 @@
       const isStop = /(?:stop|cancel|abort|停止|取消|中止)/i.test(identity);
       const isSend = /(?:send|submit|发送|提交)/i.test(identity);
       if (!isStop && (isSend || button.getAttribute?.("aria-busy") !== "true")) {
+        eligible.add(button);
         button.classList.add(SEND_LIGHTNING_CLASS);
       }
+    }
+    for (const button of composer.querySelectorAll(`.${SEND_LIGHTNING_CLASS}`)) {
+      if (!eligible.has(button)) button.classList.remove(SEND_LIGHTNING_CLASS);
     }
   };
 
   const ensure = () => {
     try {
       if (window.__CODEX_DREAM_SKIN_DISABLED__) return;
+      const currentState = window[STATE_KEY];
+      if (currentState?.installToken === installToken) currentState.ensureCount += 1;
       const root = document.documentElement;
       if (!root || !document.body) return;
       if (document.querySelector("[data-codex-pet-id]") &&
@@ -612,10 +652,12 @@
       if (!shellMain || !shellContent) {
         // Keep the shared media alive through the brief gap between cached
         // pages being hidden and shown. It is still cleaned up on auxiliary UI.
-        if (document.querySelector(SHELL_SELECTOR)) return;
+        if (shellEverFound || document.querySelector(SHELL_SELECTOR)) return;
         clearSkinDom();
         return;
       }
+    shellEverFound = true;
+    activeShell = shell;
     markShell(shell);
 
     const sidebarStyle = shellSidebar ? getComputedStyle(shellSidebar) : null;
@@ -625,7 +667,10 @@
     const mainRect = shellMain.getBoundingClientRect?.();
     const fullscreenMode = !sidebarVisible && (!mainRect || mainRect.left < 48);
     const runtimeState = window[STATE_KEY];
-    if (runtimeState) runtimeState.mode = fullscreenMode ? "fullscreen" : "standard";
+    if (runtimeState) {
+      runtimeState.mode = fullscreenMode ? "fullscreen" : "standard";
+      runtimeState.shellEverFound = true;
+    }
 
     root.classList.add("codex-dream-skin");
     applyProfile(root, fullscreenMode);
@@ -654,15 +699,12 @@
       getComputedStyle(legacyParent).display !== "contents" &&
       !legacyHero.classList?.contains("group/home-takeover") &&
       legacyHero.querySelector?.('[data-feature="game-source"]'));
-    for (const candidate of document.querySelectorAll('[role="main"]')) {
+    for (const candidate of homeScope.querySelectorAll('[role="main"]')) {
       candidate.classList.toggle("dream-home", candidate === home);
       candidate.classList.toggle("dream-home-legacy", candidate === home && legacyHome);
       candidate.classList.toggle("dream-task", candidate !== home);
     }
     const utilityBars = new Set(home ? home.querySelectorAll('[class*="_homeUtilityBar_"]') : []);
-    for (const candidate of document.querySelectorAll(`.${HOME_UTILITY_CLASS}`)) {
-      if (!utilityBars.has(candidate)) candidate.classList.remove(HOME_UTILITY_CLASS);
-    }
     for (const candidate of utilityBars) candidate.classList.add(HOME_UTILITY_CLASS);
     shellMain.classList.toggle("dream-home-shell", Boolean(home));
     decorateControls(composer);
@@ -678,6 +720,10 @@
       chrome.classList.toggle("dream-home-shell", Boolean(home));
     } catch {
       // Renderer exceptions must not escape into Codex.
+    } finally {
+      // Our marker/palette writes are already accounted for. Do not turn them
+      // into another whole-document discovery pass.
+      observer?.takeRecords?.();
     }
   };
 
@@ -696,44 +742,72 @@
   };
 
   const scheduler = { timeout: null };
-  const scheduleEnsure = () => {
-    // A streaming chat must not keep postponing a pending route update.
+  const scheduleControls = () => {
     if (scheduler.timeout) return;
     scheduler.timeout = setTimeout(() => {
       scheduler.timeout = null;
-      ensure();
-    }, 180);
+      decorateControls(activeShell?.composer);
+      observer?.takeRecords?.();
+    }, 32);
   };
+  const routeSelector = `${SHELL_SELECTOR}, [role="main"], ` +
+    "[data-app-shell-main-content-layout], .messaging-root.messaging-embedded, " +
+    "[data-home-ambient-suggestions], [data-testid=\"home-icon\"], " +
+    "aside.app-shell-left-panel, aside[data-app-shell-left-panel-appearance], " +
+    "aside[data-testid=\"app-shell-floating-left-panel\"]";
+  const composerSelector = ".composer-surface-chrome, [data-codex-composer-root], [data-codex-composer]";
+  const affectsRoute = (node) => Boolean(node && (
+    node === document.documentElement || node === document.body ||
+    node.matches?.(routeSelector) || node.querySelector?.(routeSelector) ||
+    node.contains?.(activeShell?.shellMain) || node.contains?.(activeShell?.shellSidebar)
+  ));
   observer = new MutationObserver((records) => {
     try {
-      if (samplingNativeShell) return;
-      // Ignore our palette style writes and unrelated inline style updates.
-      // Cached pages can switch visibility using style/hidden without remounting.
-      if (records?.length && !records.some((record) =>
-        record.attributeName !== "style" ||
-        (record.target !== document.documentElement &&
-          (record.target.matches?.(SHELL_SELECTOR) || record.target.querySelector?.(SHELL_SELECTOR))))) return;
-      scheduleEnsure();
+      if (samplingNativeShell || window.__CODEX_DREAM_SKIN_DISABLED__) return;
+      const meaningful = (records || []).filter((record) =>
+        !(record.attributeName === "style" && record.target === document.documentElement));
+      const routeChanged = meaningful.some((record) => affectsRoute(record.target) ||
+        [...(record.addedNodes || []), ...(record.removedNodes || [])].some((node) =>
+          affectsRoute(node) || node.matches?.(composerSelector) || node.querySelector?.(composerSelector)));
+      if (routeChanged) {
+        if (meaningful.some((record) => record.target === document.documentElement ||
+            record.target === document.body)) lastProfileKey = null;
+        // Mutation observers run before the next paint. A delayed timeout here
+        // briefly exposes the native surface when a cached chat becomes visible.
+        ensure();
+      } else if (meaningful.some((record) =>
+        record.target?.matches?.(composerSelector) || activeShell?.composer?.contains?.(record.target) ||
+        [...(record.addedNodes || []), ...(record.removedNodes || [])].some((node) =>
+          node.matches?.(composerSelector) || node.querySelector?.(composerSelector)))) {
+        scheduleControls();
+      }
     } catch {}
   });
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["class", "style", "hidden", "inert", "data-app-shell-active-page", "data-theme", "data-appearance", "data-color-mode"],
+    attributeFilter: ["class", "style", "hidden", "inert", "data-app-shell-active-page", "data-theme", "data-appearance", "data-color-mode", "aria-label", "aria-busy"],
   });
   const timer = setInterval(ensure, 5000);
   window[STATE_KEY] = {
     ensure, cleanup, observer, timer, scheduler, artUrl, fullscreenArtUrl, profile, config, acceptMotionFrame,
-    installToken, mode: "standard", version: "1.5.3",
+    artSource: artDataUrl, fullscreenArtSource: fullscreenArtDataUrl,
+    profileAnalyzed: Boolean(reuseArt && previous?.profileAnalyzed),
+    motionFrames: sameMotion ? previous.motionFrames || 0 : 0,
+    lastMotionAt: sameMotion ? previous.lastMotionAt || 0 : 0,
+    ensureCount: 0, shellEverFound,
+    installToken, mode: "standard", version: "1.5.4",
   };
   ensure();
-  analyzeArt().then((result) => {
+  if (!window[STATE_KEY].profileAnalyzed) analyzeArt().then((result) => {
     const state = window[STATE_KEY];
     if (state?.installToken !== installToken || window.__CODEX_DREAM_SKIN_DISABLED__) return;
     profile = result;
+    profileRevision += 1;
     state.profile = result;
+    state.profileAnalyzed = true;
     ensure();
   }).catch(() => {});
-  return { installed: true, version: "1.5.3", adaptive: true, compat: "26.903" };
+  return { installed: true, version: "1.5.4", adaptive: true, compat: "26.903" };
 })(__DREAM_CSS_JSON__, __DREAM_ART_JSON__, __DREAM_FULLSCREEN_ART_JSON__, __DREAM_THEME_JSON__)

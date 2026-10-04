@@ -33,8 +33,8 @@ ctx.window.__CODEX_DREAM_SKIN_STATE__ = {
 assert.equal(vm.runInNewContext(expression, ctx), false, 'a missing media layer must be recovered');
 elements.set('codex-dream-skin-motion', {});
 assert.equal(vm.runInNewContext(expression, ctx), true, 'healthy renderers retain their current playback layer');
-assert.equal(ensureCalls, 2);
+assert.equal(ensureCalls, 1, 'healthy reads must not scan and rewrite the complete document');
 ctx.window.__CODEX_DREAM_SKIN_DISABLED__ = true;
 assert.equal(vm.runInNewContext(expression, ctx), false);
-assert.equal(ensureCalls, 2, 'disabled renderers must not be enabled by a health read');
+assert.equal(ensureCalls, 1, 'disabled renderers must not be enabled by a health read');
 console.log('PASS: cached routes cannot fail startup; document and media replacement are detected.');

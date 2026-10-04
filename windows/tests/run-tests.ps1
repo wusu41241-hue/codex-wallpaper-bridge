@@ -841,6 +841,9 @@ try {
   $motionRelayTest = Invoke-DreamSkinNative -FilePath $node.Path -ArgumentList @(
     (Join-Path $PSScriptRoot 'motion-relay.test.mjs'))
   if ($motionRelayTest.ExitCode -ne 0) { throw 'Wallpaper frame relay regression test failed.' }
+  $motionBroadcastTest = Invoke-DreamSkinNative -FilePath $node.Path -ArgumentList @(
+    (Join-Path $PSScriptRoot 'motion-broadcast.test.mjs'))
+  if ($motionBroadcastTest.ExitCode -ne 0) { throw 'Wallpaper frame broadcast regression test failed.' }
   $bootstrapTest = Invoke-DreamSkinNative -FilePath $node.Path -ArgumentList @(
     (Join-Path $PSScriptRoot 'injector-bootstrap.test.mjs'))
   if ($bootstrapTest.ExitCode -ne 0) { throw 'Injector early-bootstrap regression test failed.' }

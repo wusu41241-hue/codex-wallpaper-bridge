@@ -8,7 +8,7 @@ import { MotionRelay } from "./motion-relay.mjs";
 const scriptPath = fileURLToPath(import.meta.url);
 const here = path.dirname(scriptPath);
 const root = path.resolve(here, "..");
-const SKIN_VERSION = "1.5.3";
+const SKIN_VERSION = "1.5.4";
 const MAX_ART_BYTES = 16 * 1024 * 1024;
 const STRONG_THEME_AUDIT_MS = 30000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -782,8 +782,8 @@ export function earlyPayloadFor(payload, revision) {
       if (window[generationKey] !== generation) { stop(); return true; }
       const targetWindow = ${FIND_CODEX_WINDOW_SOURCE};
       if (!targetWindow) return false;
-      stop();
       try { targetWindow.eval(${JSON.stringify(payload)}); } catch { return false; }
+      stop();
       window[appliedKey] = generation;
       return true;
     };
@@ -885,11 +885,101 @@ export function rendererHealthExpression(version = SKIN_VERSION) {
   return `(() => {
     const state = window.__CODEX_DREAM_SKIN_STATE__;
     if (!state || state.version !== ${JSON.stringify(version)} || window.__CODEX_DREAM_SKIN_DISABLED__) return false;
-    state.ensure?.();
-    return Boolean(document.getElementById('codex-dream-skin-style') &&
+    const layersPresent = () => Boolean(document.getElementById('codex-dream-skin-style') &&
       document.getElementById('codex-dream-skin-chrome') &&
       (!state.config?.motion || document.getElementById('codex-dream-skin-motion')));
+    if (layersPresent()) return true;
+    state.ensure?.();
+    return layersPresent();
   })()`;
+}
+
+// Motion frames use a cached, already-verified context. A cached conversation or
+// slow auxiliary target must never hold up another window's newest frame.
+export function motionReceiverExpression(frame = null, revision = null) {
+  return `(() => {
+    const cacheKey = '__CODEX_DREAM_SKIN_MOTION_CONTEXT__';
+    const stateKey = '__CODEX_DREAM_SKIN_STATE__';
+    let receiver = window;
+    let state = window[stateKey];
+    if (!state?.acceptMotionFrame) {
+      const cached = window[cacheKey];
+      let cachedReceiver = null;
+      try {
+        if (cached?.win?.document === cached.document && cached.win[stateKey]?.acceptMotionFrame) cachedReceiver = cached.win;
+      } catch { delete window[cacheKey]; }
+      receiver = cachedReceiver || ${FIND_CODEX_WINDOW_SOURCE};
+      if (!receiver) return { available: false, accepted: false };
+      state = receiver[stateKey];
+      if (!state?.acceptMotionFrame) return { available: false, accepted: false };
+      window[cacheKey] = { win: receiver, document: receiver.document };
+    }
+    const available = !receiver.__CODEX_DREAM_SKIN_DISABLED__ &&
+      (receiver.document.visibilityState !== 'hidden' || (state.motionFrames ?? 0) < 2 || receiver.__CODEX_DREAM_SKIN_PERF_ACTIVE__ === true);
+    if (!available) return { available: false, accepted: false };
+    ${frame === null ? 'return { available: true, accepted: false };' : `return { available: true, accepted: state.acceptMotionFrame(${JSON.stringify(frame)}, ${JSON.stringify(revision)}) === true };`}
+  })()`;
+}
+
+export class MotionBroadcaster {
+  constructor(getSessions, { probeIntervalMs = 300 } = {}) {
+    this.getSessions = getSessions;
+    this.slots = new WeakMap();
+    this.probeIntervalMs = probeIntervalMs;
+  }
+
+  slot(session) {
+    let slot = this.slots.get(session);
+    if (!slot) { slot = { available: true, busy: false, probeAt: 0 }; this.slots.set(session, slot); }
+    return slot;
+  }
+
+  hasReceivers() {
+    let available = false;
+    for (const session of this.getSessions()) {
+      if (session.closed) continue;
+      const slot = this.slot(session);
+      if (slot.available) { available = true; continue; }
+      if (slot.busy || Date.now() < slot.probeAt) continue;
+      slot.busy = true;
+      slot.probeAt = Date.now() + this.probeIntervalMs;
+      Promise.resolve().then(() => session.evaluate(motionReceiverExpression())).then(result => {
+        slot.available = result?.available === true;
+      }).catch(() => { slot.available = false; slot.probeAt = Date.now() + 1000; }).finally(() => { slot.busy = false; });
+    }
+    return available;
+  }
+
+  deliver(frame, revision) {
+    let scheduled = false;
+    let expression = null;
+    for (const session of this.getSessions()) {
+      if (session.closed) continue;
+      const slot = this.slot(session);
+      if (!slot.available || slot.busy) continue;
+      expression ??= motionReceiverExpression(frame, revision);
+      slot.busy = true;
+      scheduled = true;
+      Promise.resolve().then(() => session.evaluate(expression)).then(result => {
+        slot.available = result?.available === true;
+        if (!slot.available) slot.probeAt = Date.now() + this.probeIntervalMs;
+      }).catch(() => { slot.available = false; slot.probeAt = Date.now() + 1000; }).finally(() => { slot.busy = false; });
+    }
+    return scheduled;
+  }
+}
+
+export async function mapConcurrent(items, limit, operation) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      try { results[index] = { status: 'fulfilled', value: await operation(items[index], index) }; }
+      catch (reason) { results[index] = { status: 'rejected', reason }; }
+    }
+  }));
+  return results;
 }
 
 async function verifySession(session, expectedTheme = null) {
@@ -925,7 +1015,8 @@ async function verifySession(session, expectedTheme = null) {
     const media = document.getElementById('codex-dream-skin-motion');
     const relayedMotion = state?.config?.motion?.transport === 'cdp';
     const motionLoaded = relayedMotion
-      ? media?.tagName === 'CANVAS' && media.width > 0 && media.height > 0 && state.motionFrames >= 2 && Date.now() - state.lastMotionAt < 3000
+      ? media?.tagName === 'CANVAS' && media.width > 0 && media.height > 0 && state.motionFrames >= 2 &&
+        (document.visibilityState === 'hidden' || Date.now() - state.lastMotionAt < 3000)
       : expectedMotion === 'video'
       ? media?.tagName === 'VIDEO' && media.readyState >= 2 && !media.error && !media.paused && media.currentTime > 0
       : media?.tagName === 'IMG' && media.naturalWidth > 0;
@@ -1072,10 +1163,9 @@ async function runOneShot(options) {
     (options.mode === "verify" ? (await loadTheme(options.themeDir)).theme : null);
   const payload = loadedPayload?.payload ?? null;
   const results = [];
-  const relay = new MotionRelay(async (frame, revision) => {
-    const expression = inCodexWindow(`window.__CODEX_DREAM_SKIN_STATE__?.acceptMotionFrame?.(${JSON.stringify(frame)}, ${JSON.stringify(revision)}) ?? false`);
-    await Promise.all(connected.map(({session}) => session.evaluate(expression).catch(() => false)));
-  });
+  const broadcaster = new MotionBroadcaster(() => connected.map(({ session }) => session));
+  const relay = new MotionRelay((frame, revision) => broadcaster.deliver(frame, revision), fetch,
+    { hasReceivers: () => broadcaster.hasReceivers() });
   if (loadedPayload?.motionRelay && options.mode === "once") relay.setSource(loadedPayload.motionRelay);
   let screenshotCaptured = false;
   try {
@@ -1130,11 +1220,9 @@ async function runWatch(options) {
   let lastStrongThemeAuditAt = 0;
   let loadedPayload = null;
   let paused = false;
-  const relay = new MotionRelay(async (frame, revision) => {
-    if (stopping || paused) return;
-    const expression = inCodexWindow(`window.__CODEX_DREAM_SKIN_STATE__?.acceptMotionFrame?.(${JSON.stringify(frame)}, ${JSON.stringify(revision)}) ?? false`);
-    await Promise.all([...sessions.values()].map(session => session.evaluate(expression).catch(() => false)));
-  });
+  const broadcaster = new MotionBroadcaster(() => stopping || paused ? [] : [...sessions.values()]);
+  const relay = new MotionRelay((frame, revision) => broadcaster.deliver(frame, revision), fetch,
+    { hasReceivers: () => broadcaster.hasReceivers() });
   const stop = () => { stopping = true; };
   const rejectTarget = (target, baseDelayMs, error = null) => {
     const previous = targetFailures.get(target.id) ?? { failures: 0, lastLogAt: 0 };
@@ -1299,10 +1387,10 @@ async function runWatch(options) {
         }
       }
 
-      for (const target of targets) {
-        if (identityAnchor.closed) break;
-        if (sessions.has(target.id)) continue;
-        if ((targetFailures.get(target.id)?.until ?? 0) > Date.now()) continue;
+      const pendingTargets = targets.filter(target => !sessions.has(target.id) &&
+        (targetFailures.get(target.id)?.until ?? 0) <= Date.now());
+      await mapConcurrent(pendingTargets, 3, async target => {
+        if (identityAnchor.closed) return;
         let session;
         let earlyScriptId = null;
         try {
@@ -1330,7 +1418,7 @@ async function runWatch(options) {
             await removeEarlyPayload(session, earlyScriptId);
             rejectTarget(target, 5000);
             session.close();
-            continue;
+            return;
           }
           fallbackTargets.set(target.id, earlyInjectionFallback);
           if (earlyInjectionFallback) attachLoadFallback(target.id, target, session);
@@ -1352,11 +1440,11 @@ async function runWatch(options) {
           fallbackTargets.delete(target.id);
           fallbackListeners.delete(target.id);
           session?.close();
-          if (identityAnchor.closed || error instanceof CdpIdentityMismatchError) break;
+          if (identityAnchor.closed || error instanceof CdpIdentityMismatchError) return;
           rejectTarget(target, 2500, error);
         }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1200));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
     }
   } finally {
     relay.stop();

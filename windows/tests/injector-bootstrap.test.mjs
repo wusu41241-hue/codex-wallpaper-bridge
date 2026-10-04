@@ -89,6 +89,16 @@ assert.deepEqual(
 assert.equal(generations.context.window.__CODEX_DREAM_SKIN_EARLY_APPLIED__, "new");
 
 const registrationStart = source.indexOf("earlyScriptId = await registerEarlyPayload");
+const retries = createFixture();
+vm.runInNewContext(earlyPayloadFor('if (!window.retryReady) throw Error("not ready"); window.installs.push("recovered")', 'retry'), retries.context);
+retries.markers.shell = true;
+retries.markers.content = true;
+retries.observers[0].callback([]);
+assert.equal(retries.observers[0].connected, true, 'a failed early install must keep watching for the route');
+retries.context.window.retryReady = true;
+retries.observers[0].callback([]);
+assert.deepEqual(retries.context.window.installs, ['recovered']);
+assert.equal(retries.observers[0].connected, false, 'the observer stops only after installation succeeds');
 const evaluateStart = source.indexOf("await session.evaluate(earlyPayloadFor", registrationStart);
 const probeStart = source.indexOf("const probe = await waitForCodexProbe", registrationStart);
 assert.ok(registrationStart >= 0 && evaluateStart > registrationStart && probeStart > evaluateStart,

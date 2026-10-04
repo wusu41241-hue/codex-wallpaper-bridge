@@ -1,15 +1,16 @@
 # Codex Wallpaper Bridge
 
-A native Windows controller that uses locally installed Wallpaper Engine wallpapers as backgrounds in Codex Desktop. Derived from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin). Controller version **3.6.2**. [中文](README.md)
+A native Windows controller that uses locally installed Wallpaper Engine wallpapers as backgrounds in Codex Desktop. Derived from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin). Controller version **3.6.3**. [中文](README.md)
 
 ## Features
 
 - Lists downloaded Workshop, user-created and built-in projects across Steam libraries.
 - Animated video, scene and web wallpapers; presets work when the original resources are installed. Application wallpapers are listed with an unsupported reason.
 - Select any wallpaper or follow the current desktop choice. Search, thumbnails, native WinForms UI and an original app icon.
-- Switch skins in an existing connectable Codex session. Recovers across conversation changes, new pages and supported connection changes.
+- Switch skins in an existing connectable Codex session. Conversation, Home and Dots transitions retain the last frame and mark the next shell before painting. Hot updates of the same wallpaper reuse the playing canvas.
+- Capture and relay target 30 FPS, reuse drawing and encoding resources, and skip duplicate frames. Slow receivers do not block other windows. Established hidden pages pause frame delivery and resume when visible.
 - Automatic connection discovery, session rebinding, health checks and recovery with backoff.
-- Wallpaper Engine renders a muted helper window outside all displays. Authorized frames travel through the existing local debugging connection into a Codex canvas, at up to roughly 8 FPS. Large video and scene files remain in their original library.
+- Wallpaper Engine renders a muted helper window outside all displays. Authorized frames travel through the existing local debugging connection into a Codex canvas. Large video and scene files remain in their original library.
 
 ## Requirements and limits
 
@@ -17,7 +18,7 @@ Windows 10/11 x64, Windows .NET Framework 4.x, official Microsoft Store Codex De
 
 The Codex session must provide a supported loopback debugging endpoint. An already open session without that endpoint cannot be guaranteed to accept a skin without being reopened. The controller reports failure and does not force a restart. Launching through the included skin shortcut attempts to establish the connection. Future changes that remove debugging support or substantially alter the UI can still require a compatibility update.
 
-This is a background frame bridge: scene interaction, desktop audio and the original rendering frame rate are not forwarded. Some web or scene projects may have their own rendering limitations.
+Capture and relay pacing target **30 FPS**. Actual playback depends on wallpaper rendering, capture and encoding, and page decoding; complex scenes can run below this target. This is a background frame bridge: scene interaction, desktop audio and the original rendering frame rate are not forwarded. Some web or scene projects may have their own rendering limitations.
 
 ## Install and use
 

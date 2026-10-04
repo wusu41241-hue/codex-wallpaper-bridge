@@ -2,14 +2,15 @@
 
 把本机 **Wallpaper Engine 壁纸库**接入 **Codex Desktop**，通过原生 Windows 控制器选择、切换和关闭背景。
 
-这是基于 [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin) 的独立扩展，控制器版本 **3.6.2**。软件不是 OpenAI、Valve 或 Wallpaper Engine 的官方产品。[English](README.en.md)
+这是基于 [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin) 的独立扩展，控制器版本 **3.6.3**。软件不是 OpenAI、Valve 或 Wallpaper Engine 的官方产品。[English](README.en.md)
 
 ## 功能
 
 - 扫描 Steam Workshop、Wallpaper Engine 自建项目、内置项目及其他 Steam 库中的已下载壁纸；显示完整列表并支持搜索。
 - 视频、场景和网页壁纸保持动态效果；已有预设在原壁纸资源齐全时可用。应用壁纸会显示不可用原因。
 - 将 Wallpaper Engine 当前桌面壁纸用于 Codex，也可为 Codex 单独选择其他壁纸。
-- 已有可连接的 Codex 会话支持热切换；切换对话、进入首页或重新创建页面后恢复背景。
+- 已有可连接的 Codex 会话支持热切换；切换对话、进入首页或 Dots 时保留最后一帧，在页面绘制前同步皮肤标记；相同壁纸热更新复用播放画布。
+- 采集和传输以 30 FPS 为目标，复用绘图与编码资源，跳过重复帧；接收较慢的窗口不会阻塞其他窗口。已开始播放的隐藏页面暂停传输，恢复可见后继续播放。
 - 带缩略图的原生 WinForms 控制器、自定义图标、关闭皮肤和可选登录启动。
 - 自动发现本机连接与新版安装位置；重新绑定变更的会话，后台检查进程和连接、定期验证背景，失败时退避恢复。
 - 不复制大视频或场景包。屏幕外辅助窗口保持静音，不抢焦点、置顶或显示在任务栏。
@@ -22,7 +23,7 @@
 - Steam 版 Wallpaper Engine 已安装并正在运行；相应壁纸资源已完整下载。
 - Codex 会话需要开放受支持的本机调试连接。通过附带的“Codex（可随时换肤）”入口启动时会尝试建立连接；已经打开且没有该接口的会话无法保证热接入。控制器会报告未应用，不会强制重启它。
 
-动态画面由 Wallpaper Engine 在显示器之外渲染，通过已验证的本机连接传给 Codex 背景画布，最高约 **8 FPS**。这是一套背景采集方式，场景鼠标互动、桌面音效和原生高帧率不会直接映射到 Codex。特殊网页或场景能否正常渲染仍取决于 Wallpaper Engine。
+动态画面由 Wallpaper Engine 在显示器之外渲染，通过已验证的本机连接传给 Codex 背景画布。采集和传输节奏目标为 **30 FPS**，实际帧率取决于壁纸渲染、本机采集与编码、页面解码的速度；复杂场景可能低于目标。这是一套背景采集方式，场景鼠标互动、桌面音效和原生高帧率不会直接映射到 Codex。特殊网页或场景能否正常渲染仍取决于 Wallpaper Engine。
 
 常见端口、安装路径、会话变化会自动恢复；若官方取消调试能力或彻底修改页面结构，仍需要更新兼容代码。项目不会保证所有未来版本都零维护。
 
