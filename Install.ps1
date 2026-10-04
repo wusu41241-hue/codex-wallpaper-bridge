@@ -55,7 +55,7 @@ try {
     Copy-Item -LiteralPath $installedExecutable -Destination $backup -Force
   }
   Copy-Item -LiteralPath $bundledExecutable -Destination $installedExecutable -Force
-  foreach ($file in @('apply-saved-theme.ps1', 'app.ico')) {
+  foreach ($file in @('apply-saved-theme.ps1', 'configure-launchers.ps1', 'app.ico')) {
     $destination = Join-Path $controlRoot $file
     Assert-DreamSkinNoReparseComponents -Path $destination
     Copy-Item -LiteralPath (Join-Path $repoRoot ('automation\controller\' + $file)) -Destination $destination -Force
@@ -63,7 +63,7 @@ try {
   $configuration = [ordered]@{ schema_version = 1; project_root = $repoRoot; port = 9335 }
   Write-DreamSkinUtf8FileAtomically -Path (Join-Path $controlRoot 'control-config.json') `
     -Content (($configuration | ConvertTo-Json) + "`r`n")
-  $record = [ordered]@{ project = 'codex-wallpaper-bridge'; controller_version = '3.6.2'; source_root = $repoRoot; installed_at = (Get-Date).ToUniversalTime().ToString('o') }
+  $record = [ordered]@{ project = 'codex-wallpaper-bridge'; controller_version = '3.6.4'; source_root = $repoRoot; installed_at = (Get-Date).ToUniversalTime().ToString('o') }
   Write-DreamSkinUtf8FileAtomically -Path (Join-Path $controlRoot 'bridge-install.json') `
     -Content (($record | ConvertTo-Json) + "`r`n")
 
@@ -85,8 +85,14 @@ try {
         $shortcut.Save()
       }
     }
+    # Prepare ordinary user launchers without running them. Cold starts open the
+    # loopback skin connection with the skin paused; later toggles remain live.
+    $launcherReport = & (Join-Path $controlRoot 'configure-launchers.ps1') -Mode Apply
+    foreach ($result in $launcherReport.results) {
+      Write-Host ("Codex launcher: " + $result.action + " - " + $result.path)
+    }
   }
-  Write-Host "Installed Codex Wallpaper Bridge 3.6.2 at $fullStateRoot."
+  Write-Host "Installed Codex Wallpaper Bridge 3.6.4 at $fullStateRoot."
   Write-Host 'Installation finished. Codex has not been started, closed or restarted.'
   Write-Host 'Open the skin controller when ready. Wallpaper Engine must be running for animated backgrounds.'
 } finally {

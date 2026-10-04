@@ -7,6 +7,7 @@ using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -28,6 +29,7 @@ namespace CodexDreamSkinController
             bool selfTest = HasArgument(args, "--self-test");
             bool motionHost = HasArgument(args, "--motion-host");
             bool supervise = HasArgument(args, "--supervise");
+            bool pause = HasArgument(args, "--pause");
             bool currentWallpaper = HasArgument(args, "--wallpaper-current");
             ControllerService service;
             try
@@ -73,6 +75,15 @@ namespace CodexDreamSkinController
                 return MotionHost.Run(service, args);
             if (supervise)
                 return RecoveryAgent.Run(service);
+
+            if (pause)
+            {
+                StartResult pausedResult = service.PauseSkin();
+                service.RecordResult(pausedResult);
+                if (!pausedResult.Success && !silent)
+                    MessageBox.Show(pausedResult.Message, "Codex Dream Skin", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return pausedResult.Success ? 0 : 2;
+            }
 
             if (native)
             {
@@ -305,12 +316,13 @@ namespace CodexDreamSkinController
 
         public virtual StartResult RecoverConnection()
         {
-            connectionCheckedUtc = DateTime.MinValue;
-            ControllerState state = GetState();
-            if (state.Paused) return StartResult.Ok("皮肤保持关闭。", false);
-            if (!state.CodexRunning || !state.CdpReady)
-                return StartResult.Fail("等待可连接的 Codex 会话；不会自动重启 Codex。");
-            return StartRuntime(false, true, true);
+            return RunSkinOperation(delegate {
+                ControllerState state = GetReadyState();
+                if (state.Paused || File.Exists(pauseFile)) return StartResult.Ok("皮肤保持关闭。", false);
+                if (!state.CodexRunning || !state.CdpReady)
+                    return StartResult.Fail("等待可连接的 Codex 会话；不会自动重启 Codex。");
+                return StartRuntimeCore(false, true, true, false);
+            });
         }
 
         public virtual bool IsMediaHostReady()
@@ -323,15 +335,16 @@ namespace CodexDreamSkinController
 
         public virtual StartResult VerifyCurrentConnection()
         {
-            connectionCheckedUtc = DateTime.MinValue;
-            ControllerState state = GetState();
-            if (state.Paused) return StartResult.Ok("皮肤保持关闭。", false);
-            if (!state.CdpReady || !state.InjectorSessionMatches)
-                return StartResult.Fail("当前皮肤进程未绑定到有效的 Codex 会话，需要重新连接。");
-            ProcessResult verified = RunPowerShell(verifyScript,
-                new string[] { "-Port", Port.ToString(CultureInfo.InvariantCulture) }, 60000);
-            return verified.ExitCode == 0 ? StartResult.Ok("背景与当前 Codex 页面已验证。", false)
-                : StartResult.Fail("页面兼容检查未通过，将自动尝试恢复连接。");
+            return RunSkinOperation(delegate {
+                ControllerState state = GetReadyState();
+                if (state.Paused || File.Exists(pauseFile)) return StartResult.Ok("皮肤保持关闭。", false);
+                if (!state.CdpReady || !state.InjectorSessionMatches)
+                    return StartResult.Fail("当前皮肤进程未绑定到有效的 Codex 会话，需要重新连接。");
+                ProcessResult verified = RunPowerShell(verifyScript,
+                    new string[] { "-Port", Port.ToString(CultureInfo.InvariantCulture) }, 60000);
+                return verified.ExitCode == 0 ? StartResult.Ok("背景与当前 Codex 页面已验证。", false)
+                    : StartResult.Fail("页面兼容检查未通过，将自动尝试恢复连接。");
+            });
         }
 
         public StartResult StartNative()
@@ -344,8 +357,7 @@ namespace CodexDreamSkinController
 
         public StartResult ConnectCurrent()
         {
-            connectionCheckedUtc = DateTime.MinValue;
-            ControllerState state = GetState();
+            ControllerState state = GetReadyState();
             if (!state.CodexRunning) return StartResult.Fail("请先打开 Codex，再检测当前会话。");
             if (!state.CdpReady) return StartResult.Fail(state.ConnectionMessage ?? "当前会话没有可连接的 Codex 页面。");
             return StartSkin(false, false);
@@ -371,9 +383,13 @@ namespace CodexDreamSkinController
 
         private StartResult StartRuntime(bool startPaused, bool silent, bool preservePause = false)
         {
+            return RunSkinOperation(delegate { return StartRuntimeCore(startPaused, silent, preservePause, false); });
+        }
+
+        private StartResult StartRuntimeCore(bool startPaused, bool silent, bool preservePause, bool applyCurrentTheme)
+        {
             if (!PrerequisitesReady) return StartResult.Fail("Dream Skin 运行时或工程入口不完整。");
-            connectionCheckedUtc = DateTime.MinValue;
-            ControllerState before = GetState();
+            ControllerState before = GetReadyState();
             if (preservePause && (before.Paused || File.Exists(pauseFile))) return StartResult.Ok("皮肤保持关闭。", false);
             if (!before.CdpReady && before.CodexRunning)
             {
@@ -382,14 +398,22 @@ namespace CodexDreamSkinController
                     : before.ConnectionMessage ?? "当前 Codex 未开放背景接口，无法热连接。";
                 return StartResult.Fail(message);
             }
+            bool wasPaused = before.Paused || File.Exists(pauseFile);
             if (!preservePause && !startPaused && before.InjectorSessionMatches && before.CdpReady && File.Exists(pauseFile)) File.Delete(pauseFile);
 
-            if (!preservePause && before.InjectorSessionMatches && before.CdpReady)
+            if (!preservePause && !startPaused && before.InjectorSessionMatches && before.CdpReady)
             {
                 if (!EnsureMotionHost(before.InjectorPid)) return StartResult.Fail("动态壁纸服务未能就绪，背景尚未启用。");
-                ProcessResult refresh = RunPowerShell(verifyScript, new string[] { "-Port", Port.ToString(CultureInfo.InvariantCulture), "-ApplyCurrentTheme" }, 60000);
+                // A repeated enable verifies an already healthy renderer. Only an
+                // actual resume or theme switch asks the watcher to apply again.
+                string[] verifyArguments = applyCurrentTheme || wasPaused
+                    ? new string[] { "-Port", Port.ToString(CultureInfo.InvariantCulture), "-ApplyCurrentTheme" }
+                    : new string[] { "-Port", Port.ToString(CultureInfo.InvariantCulture) };
+                ProcessResult refresh = RunPowerShell(verifyScript, verifyArguments, 60000);
+                if (refresh.ExitCode != 0 && !applyCurrentTheme && !wasPaused)
+                    refresh = RunPowerShell(verifyScript, new string[] { "-Port", Port.ToString(CultureInfo.InvariantCulture), "-ApplyCurrentTheme" }, 60000);
                 if (refresh.ExitCode != 0) return StartResult.Fail("皮肤刷新失败：" + Compact(refresh.Error));
-                return StartResult.Ok("皮肤已刷新；Codex 没有重启。", false);
+                return StartResult.Ok(wasPaused ? "皮肤已热启用；Codex 没有重启。" : "皮肤已连接并验证；Codex 没有重启。", false);
             }
 
             List<string> arguments = new List<string>();
@@ -462,10 +486,14 @@ namespace CodexDreamSkinController
 
         public StartResult ApplyTheme(ThemeItem item, bool allowOneRestart)
         {
+            return RunSkinOperation(delegate { return ApplyThemeCore(item, allowOneRestart); });
+        }
+
+        private StartResult ApplyThemeCore(ThemeItem item, bool allowOneRestart)
+        {
             if (item == null) return StartResult.Fail("请先选择主题。");
             if (!String.IsNullOrEmpty(item.UnavailableReason)) return StartResult.Fail(item.UnavailableReason);
-            connectionCheckedUtc = DateTime.MinValue;
-            ControllerState state = GetState();
+            ControllerState state = GetReadyState();
             if (state.CodexRunning && !state.CdpReady)
             {
                 return StartResult.Fail(state.ConnectionMessage ?? "当前 Codex 没有可连接的背景接口；壁纸尚未应用。");
@@ -478,7 +506,8 @@ namespace CodexDreamSkinController
                 string imported = WallpaperCatalog.Import(item, SavedThemesRoot);
                 ProcessResult prepared = RunPowerShell(applySavedScript, new string[] { "-ThemeDirectory", imported }, 60000);
                 if (prepared.ExitCode != 0) return StartResult.Fail("导入 Wallpaper Engine 壁纸失败：" + Compact(prepared.Error));
-                StartResult enabled = StartSkin(false, false);
+                StartResult enabled = StartRuntimeCore(false, false, false, true);
+                if (enabled.Success) EnsureRecoveryAgent();
                 if (!enabled.Success) return StartResult.Fail("壁纸已导入，但启用失败：" + enabled.Message);
                 return StartResult.Ok("已将 Wallpaper Engine 壁纸 “" + item.Name + "” 用作 Codex 动态皮肤。", false);
             }
@@ -487,7 +516,8 @@ namespace CodexDreamSkinController
                 if (!File.Exists(applySavedScript)) return StartResult.Fail("已保存主题应用脚本不存在。");
                 ProcessResult saved = RunPowerShell(applySavedScript, new string[] { "-ThemeDirectory", item.Directory }, 60000);
                 if (saved.ExitCode != 0) return StartResult.Fail("切换已保存主题失败：" + Compact(saved.Error));
-                StartResult enabled = StartSkin(false, false);
+                StartResult enabled = StartRuntimeCore(false, false, false, true);
+                if (enabled.Success) EnsureRecoveryAgent();
                 if (!enabled.Success) return StartResult.Fail("主题已保存，但启用失败：" + enabled.Message);
                 return StartResult.Ok("已启用选中主题 “" + item.Name + "”；Codex 没有重启。", false);
             }
@@ -496,16 +526,21 @@ namespace CodexDreamSkinController
 
         public StartResult PauseSkin()
         {
+            return RunSkinOperation(PauseSkinCore);
+        }
+
+        private StartResult PauseSkinCore()
+        {
             Directory.CreateDirectory(stateRoot);
             string temporary = pauseFile + "." + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) + ".tmp";
             File.WriteAllText(temporary, "paused by CodexDreamSkinController\r\n", new UTF8Encoding(false));
             if (File.Exists(pauseFile)) File.Delete(temporary);
             else File.Move(temporary, pauseFile);
-            ControllerState state = GetState();
+            ControllerState state = GetReadyState();
             if (!state.CdpReady)
                 return StartResult.Ok("已设为关闭；本次 Codex 没有皮肤接口。", false);
             // Let the existing watcher remove early-injection hooks, then verify DOM removal.
-            Thread.Sleep(1800);
+            WaitForRuntime(1800);
             ProcessResult removed = RunPowerShell(verifyScript, new string[] {
                 "-Port", Port.ToString(CultureInfo.InvariantCulture), "-RemoveSkin"
             }, 60000);
@@ -557,7 +592,7 @@ namespace CodexDreamSkinController
             ControllerState state = GetState();
             Dictionary<string, object> report = new Dictionary<string, object>();
             report["status"] = PrerequisitesReady ? "pass" : "fail";
-            report["controller_version"] = "3.6.3";
+            report["controller_version"] = "3.6.4";
             report["automatic_recovery"] = true;
             report["injector_session_matches"] = state.InjectorSessionMatches;
             report["periodic_readonly_render_check"] = true;
@@ -696,11 +731,58 @@ namespace CodexDreamSkinController
 
         private RuntimeConnection ProbeConnection()
         {
-            if (cachedConnection != null && (DateTime.UtcNow - connectionCheckedUtc).TotalSeconds < 5) return cachedConnection;
-            cachedConnection = RuntimeConnection.Discover(Port);
+            double cacheSeconds = cachedConnection != null && cachedConnection.Ready ? 5 : 0.5;
+            if (cachedConnection != null && (DateTime.UtcNow - connectionCheckedUtc).TotalSeconds < cacheSeconds) return cachedConnection;
+            cachedConnection = DiscoverConnection(Port);
             if (cachedConnection.Ready) connectionPort = cachedConnection.Port;
             connectionCheckedUtc = DateTime.UtcNow;
             return cachedConnection;
+        }
+
+        protected virtual RuntimeConnection DiscoverConnection(int preferredPort)
+        {
+            return RuntimeConnection.Discover(preferredPort);
+        }
+
+        protected virtual void WaitForRuntime(int milliseconds)
+        {
+            Thread.Sleep(milliseconds);
+        }
+
+        private ControllerState GetReadyState()
+        {
+            ControllerState state = GetFreshState();
+            // Endpoint registration and page creation briefly race normal app
+            // startup. Recheck ownership and targets before declaring it absent;
+            // an existing session without CDP is never relaunched here.
+            for (int retry = 0; retry < 6 && state.CodexRunning && !state.CdpReady; retry++)
+            {
+                if (state.ConnectionCode == "untrusted_owner" || state.ConnectionCode == "invalid_endpoint") break;
+                WaitForRuntime(200);
+                state = GetFreshState();
+            }
+            return state;
+        }
+
+        private StartResult RunSkinOperation(Func<StartResult> action)
+        {
+            string rootKey;
+            using (SHA256 hash = SHA256.Create())
+                rootKey = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(
+                    Path.GetFullPath(stateRoot).TrimEnd('\\', '/').ToUpperInvariant()))).Replace("-", "");
+            string name = "Local\\CodexDreamSkin.ControllerOperation." + WindowsIdentity.GetCurrent().User.Value + "." + rootKey;
+            using (Mutex mutex = new Mutex(false, name))
+            {
+                bool owns = false;
+                try
+                {
+                    try { owns = mutex.WaitOne(30000); }
+                    catch (AbandonedMutexException) { owns = true; }
+                    if (!owns) return StartResult.Fail("另一项皮肤操作尚未完成，请稍后再试；Codex 保持运行。");
+                    return action();
+                }
+                finally { if (owns) mutex.ReleaseMutex(); }
+            }
         }
 
         private bool IsCodexRunning()
@@ -1017,7 +1099,7 @@ namespace CodexDreamSkinController
             Controls.Add(autoStart);
 
             Label version = new Label();
-            version.Text = "控制器 3.6.3 · Wallpaper";
+            version.Text = "控制器 3.6.4 · Wallpaper";
             version.Location = new Point(682, 606);
             version.AutoSize = true;
             version.ForeColor = Color.FromArgb(121, 138, 157);
@@ -1196,7 +1278,13 @@ namespace CodexDreamSkinController
             if (!state.Paused && state.RecoveryStatus == "compatibility-check-needed") runtime = "页面兼容检查未通过，需要兼容修复";
             else if (!state.Paused && (state.RecoveryStatus == "retry-wait" || (state.InjectorRunning && !state.InjectorSessionMatches))) runtime = "正在自动重新连接";
             string detectedCodex = String.IsNullOrEmpty(service.CodexVersion) ? "未检测到" : service.CodexVersion;
-            string connection = state.CdpReady ? "可热连接 · " + state.CdpPort : state.ConnectionCode == "no_targets" ? "有端口，但无 Codex 页面" : "当前会话未提供背景接口";
+            string connection = state.CdpReady ? "可热连接 · " + state.CdpPort
+                : state.ConnectionCode == "no_targets" ? "接口已开放，等待 Codex 页面"
+                : state.ConnectionCode == "protocol_error" ? "接口响应暂不可用，正在重新检测"
+                : state.ConnectionCode == "discovery_unavailable" ? "本机接口检测暂不可用，正在重新检测"
+                : state.ConnectionCode == "owner_check_unavailable" ? "接口进程暂未确认，正在重新检测"
+                : state.ConnectionCode == "untrusted_owner" || state.ConnectionCode == "invalid_endpoint" ? "接口身份验证未通过"
+                : "当前会话未提供背景接口";
             statusLabel.Text = "状态：" + runtime + "；连接：" + connection +
                 "\r\nCodex " + detectedCodex + " · 运行时 " + service.RuntimeVersion +
                 "\r\n当前主题：" + state.ActiveThemeName;

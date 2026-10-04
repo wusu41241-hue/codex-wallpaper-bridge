@@ -26,17 +26,30 @@ namespace CodexDreamSkinController
 
         internal static RuntimeConnection Discover(int preferredPort)
         {
-            var ports = OwnedLoopbackPorts();
-            ports.Sort(delegate(int a, int b) { return a == preferredPort ? -1 : b == preferredPort ? 1 : a.CompareTo(b); });
+            string inventoryFailure;
+            var ports = OwnedLoopbackPorts(out inventoryFailure);
+            return DiscoverFromInventory(preferredPort, ports, inventoryFailure,
+                delegate(int port) { return Probe(port, true, delegate(string route) { return Read(port, route); }); });
+        }
+
+        internal static RuntimeConnection DiscoverFromInventory(int preferredPort, List<int> ports,
+            string inventoryFailure, Func<int, RuntimeConnection> probe)
+        {
+            ports.Sort(delegate(int a, int b) { return a == b ? 0 : a == preferredPort ? -1 : b == preferredPort ? 1 : a.CompareTo(b); });
             RuntimeConnection last = null;
             foreach (int port in ports)
             {
-                var result = Probe(port, true, delegate(string route) { return Read(port, route); });
+                var result = probe(port);
                 if (result.Ready) return result;
                 if (last == null || result.Code == "no_targets") last = result;
             }
+            if (last == null && !String.IsNullOrEmpty(inventoryFailure))
+                return new RuntimeConnection { Port = preferredPort, Code = inventoryFailure,
+                    Message = inventoryFailure == "owner_check_unavailable"
+                        ? "Codex 接口进程暂未能确认，正在重新检测。"
+                        : "本机接口检测暂不可用，正在重新检测。" };
             return last ?? new RuntimeConnection { Port = preferredPort, Code = "no_endpoint",
-                Message = "当前 Codex 未开放背景接口，无法在此会话热启用。控制器和壁纸库可正常使用。" };
+                Message = "当前会话未开启热换肤连接。下次从桌面或开始菜单的 Codex 入口启动后，可随时启用或关闭皮肤；当前不会自动重启 Codex。" };
         }
 
         // The owner is checked before reading an endpoint; response data alone
@@ -107,19 +120,24 @@ namespace CodexDreamSkinController
             }
         }
 
-        private static List<int> OwnedLoopbackPorts()
+        private static List<int> OwnedLoopbackPorts(out string failure)
         {
+            failure = null;
             var result = new List<int>();
             var trusted = new Dictionary<int, bool>();
             IntPtr table = IntPtr.Zero;
             try
             {
                 int size = 0;
-                GetExtendedTcpTable(IntPtr.Zero, ref size, false, 2, 3, 0);
-                if (size < 4 || size > 1048576) return result;
+                uint firstRead = GetExtendedTcpTable(IntPtr.Zero, ref size, false, 2, 3, 0);
+                if ((firstRead != 0 && firstRead != 122) || size < 4 || size > 1048576)
+                { failure = "discovery_unavailable"; return result; }
                 table = Marshal.AllocHGlobal(size);
-                if (GetExtendedTcpTable(table, ref size, false, 2, 3, 0) != 0) return result;
+                if (GetExtendedTcpTable(table, ref size, false, 2, 3, 0) != 0)
+                { failure = "discovery_unavailable"; return result; }
                 int count = Marshal.ReadInt32(table);
+                if (count < 0 || count > (size - 4) / 24)
+                { failure = "discovery_unavailable"; return result; }
                 for (int index = 0; index < count && 4 + (index + 1) * 24 <= size; index++)
                 {
                     IntPtr row = IntPtr.Add(table, 4 + index * 24);
@@ -136,8 +154,15 @@ namespace CodexDreamSkinController
                         try
                         {
                             using (Process process = Process.GetProcessById(owner))
-                                allowed = Regex.IsMatch(process.MainModule.FileName,
-                                    @"\\WindowsApps\\OpenAI\.Codex_[^\\]+\\app\\(?:ChatGPT|Codex)\.exe$", RegexOptions.IgnoreCase);
+                            {
+                                string imagePath = ProcessImagePath(process);
+                                if (String.IsNullOrEmpty(imagePath))
+                                {
+                                    if (process.ProcessName.Equals("ChatGPT", StringComparison.OrdinalIgnoreCase) ||
+                                        process.ProcessName.Equals("Codex", StringComparison.OrdinalIgnoreCase)) failure = "owner_check_unavailable";
+                                }
+                                else allowed = IsRegisteredCodexImagePath(imagePath);
+                            }
                         }
                         catch { }
                         trusted[owner] = allowed;
@@ -145,12 +170,37 @@ namespace CodexDreamSkinController
                     if (allowed && port >= 1024 && !result.Contains(port)) result.Add(port);
                 }
             }
-            catch { }
+            catch { failure = "discovery_unavailable"; }
             finally { if (table != IntPtr.Zero) Marshal.FreeHGlobal(table); }
             return result;
         }
 
+        internal static bool IsRegisteredCodexImagePath(string path)
+        {
+            return !String.IsNullOrEmpty(path) && Regex.IsMatch(path,
+                @"\\WindowsApps\\OpenAI\.Codex_[^\\]+\\app\\(?:ChatGPT|Codex)\.exe$", RegexOptions.IgnoreCase);
+        }
+
+        private static string ProcessImagePath(Process process)
+        {
+            try { return process.MainModule.FileName; } catch { }
+            // Image-path discovery does not need VM read access to the app.
+            IntPtr handle = OpenProcess(0x1000, false, process.Id);
+            if (handle == IntPtr.Zero) return null;
+            try
+            {
+                var path = new System.Text.StringBuilder(32768);
+                int length = path.Capacity;
+                return QueryFullProcessImageName(handle, 0, path, ref length) ? path.ToString() : null;
+            }
+            finally { CloseHandle(handle); }
+        }
+
         [DllImport("iphlpapi.dll", SetLastError = true)]
         private static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order, int family, int tableClass, uint reserved);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool QueryFullProcessImageName(IntPtr process, int flags, System.Text.StringBuilder path, ref int size);
+        [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
     }
 }

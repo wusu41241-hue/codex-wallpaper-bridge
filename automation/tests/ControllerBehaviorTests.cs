@@ -15,6 +15,9 @@ using CodexDreamSkinController;
 internal sealed class FakeService : ControllerService
 {
     internal readonly List<string> Calls = new List<string>();
+    internal readonly Queue<ControllerState> States = new Queue<ControllerState>();
+    internal Action<string, string[]> BeforeRun;
+    internal int Waits;
     internal ControllerState State = new ControllerState { CdpReady=true, CodexRunning=true, InjectorRunning=true, InjectorSessionMatches=true, ActiveThemeId="A", ActiveThemeName="A" };
     internal int Failure;
     internal FakeService(string root) : base(PrepareRoot(root)) { }
@@ -26,9 +29,11 @@ internal sealed class FakeService : ControllerService
     public override bool PrerequisitesReady { get { return true; } }
     public override void EnsureRecoveryAgent() { }
     public override bool IsMediaHostReady() { return true; }
-    public override ControllerState GetState() { return State; }
+    public override ControllerState GetState() { if (States.Count > 0) State = States.Dequeue(); return State; }
+    protected override void WaitForRuntime(int milliseconds) { Waits++; }
     protected override ProcessResult RunPowerShell(string script, string[] args, int timeout) {
         Calls.Add(Path.GetFileName(script) + " " + String.Join("|", args));
+        if (BeforeRun != null) BeforeRun(script, args);
         if (Path.GetFileName(script) == "start-dream-skin.ps1" && Failure == 0) {
             State.InjectorRunning=true; State.InjectorSessionMatches=true; State.CdpReady=true; State.CodexRunning=true;
         }
@@ -59,6 +64,22 @@ internal static class ControllerBehaviorTests
         if(args.Length==0) throw new ArgumentException("Pass an isolated test-state directory.");
         root=args[0]; Directory.CreateDirectory(root);
         var now = new DateTime(2026,10,3,12,0,0,DateTimeKind.Utc);
+        var noPort = RuntimeConnection.DiscoverFromInventory(9335,new List<int>(),null,port=>{throw new Exception("unexpected probe");});
+        Check(noPort.Code=="no_endpoint", "a confirmed empty port inventory reports an unopened session");
+        var unavailableInventory = RuntimeConnection.DiscoverFromInventory(9335,new List<int>(),"discovery_unavailable",port=>null);
+        Check(unavailableInventory.Code=="discovery_unavailable", "port enumeration failure is not mislabeled as an unopened interface");
+        var unreadableOwner = RuntimeConnection.DiscoverFromInventory(9335,new List<int>(),"owner_check_unavailable",port=>null);
+        Check(unreadableOwner.Code=="owner_check_unavailable", "unreadable Codex image ownership remains a retryable detection condition");
+        var preferredFirst = new List<int>();
+        var readyInventory = RuntimeConnection.DiscoverFromInventory(9335,new List<int>{9444,9335},"owner_check_unavailable",port=>{
+            preferredFirst.Add(port);return new RuntimeConnection {Ready=true,Port=port,Code="ready",BrowserId="same-session"};
+        });
+        Check(readyInventory.Ready && readyInventory.Port==9335 && preferredFirst.Count==1,
+            "a verified preferred interface wins over incomplete unrelated ownership checks");
+        var pendingTargets = RuntimeConnection.DiscoverFromInventory(9335,new List<int>{9335},null,port=>new RuntimeConnection{Port=port,Code="no_targets"});
+        Check(pendingTargets.Code=="no_targets", "a listening interface awaiting a renderer is distinct from no interface");
+        Check(RuntimeConnection.IsRegisteredCodexImagePath(@"C:\Program Files\WindowsApps\OpenAI.Codex_26.930.2377.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe") &&
+            !RuntimeConnection.IsRegisteredCodexImagePath(@"C:\Other\ChatGPT.exe"), "limited image lookup keeps the official Codex path boundary");
         var recovery = new RecoveryPolicy();
         var recoveryState = new ControllerState { CodexRunning=true, CdpReady=true, CodexSessionKey="first", InjectorSessionMatches=true };
         Check(recovery.Decide(recoveryState,true,now)=="recover", "a stopped injector is recovered in the existing Codex session");
@@ -246,7 +267,41 @@ internal static class ControllerBehaviorTests
         Check(unavailable.StartNative().Success && unavailable.Calls.Count==0,"native launcher leaves existing Codex untouched");
         Check(!unavailable.ConnectCurrent().Success && unavailable.Calls.Count==0,"unavailable hot connection does not launch or restart Codex");
         var hot=NewService("hot");
-        Check(hot.ConnectCurrent().Success && hot.Calls.Single().Contains("-ApplyCurrentTheme"),"existing compatible Codex is attached without a launch command");
+        Check(hot.ConnectCurrent().Success && hot.Calls.Single().StartsWith("verify-dream-skin.ps1") && !hot.Calls[0].Contains("-ApplyCurrentTheme"),
+            "an already healthy hot connection is verified without reloading the wallpaper");
+        var alreadyActive=NewService("already-active");
+        Check(alreadyActive.StartSkin(false,true).Success && alreadyActive.StartSkin(false,true).Success &&
+            alreadyActive.Calls.Count==2 && alreadyActive.Calls.All(x=>x.StartsWith("verify-dream-skin.ps1") && !x.Contains("-ApplyCurrentTheme")),
+            "repeated enabling keeps the healthy watcher and playing wallpaper intact");
+        var staleRenderer=NewService("stale-renderer");
+        staleRenderer.BeforeRun=delegate(string script,string[] commandArgs){staleRenderer.Failure=staleRenderer.Calls.Count==1?2:0;};
+        Check(staleRenderer.StartSkin(false,true).Success && staleRenderer.Calls.Count==2 &&
+            !staleRenderer.Calls[0].Contains("-ApplyCurrentTheme") && staleRenderer.Calls[1].Contains("-ApplyCurrentTheme"),
+            "a failed readonly renderer check repairs the skin without restarting Codex");
+        var startingEndpoint=NewService("starting-endpoint");
+        var readyState=startingEndpoint.State;
+        startingEndpoint.States.Enqueue(new ControllerState {CodexRunning=true,ConnectionCode="no_endpoint"});
+        startingEndpoint.States.Enqueue(new ControllerState {CodexRunning=true,ConnectionCode="no_targets"});
+        startingEndpoint.States.Enqueue(readyState);
+        Check(startingEndpoint.StartSkin(false,true).Success && startingEndpoint.Waits==2 && startingEndpoint.Calls.Single().StartsWith("verify-dream-skin.ps1"),
+            "transient endpoint and target registration are retried before an unavailable-interface error");
+        var resumingEndpoint=NewService("resuming-endpoint");
+        File.WriteAllText(Path.Combine(resumingEndpoint.StateRoot,"paused"),"paused");
+        var resumedState=resumingEndpoint.State;
+        resumingEndpoint.States.Enqueue(new ControllerState {CodexRunning=true,Paused=true,ConnectionCode="no_endpoint"});
+        resumingEndpoint.States.Enqueue(resumedState);
+        Check(resumingEndpoint.StartSkin(false,true).Success && resumingEndpoint.Waits==1 && resumingEndpoint.Calls.Single().Contains("-ApplyCurrentTheme") &&
+            !File.Exists(Path.Combine(resumingEndpoint.StateRoot,"paused")),
+            "manual resume retries a briefly absent endpoint even while the stored skin state is paused");
+        var neverOpened=NewService("never-opened"); neverOpened.State.CdpReady=false; neverOpened.State.ConnectionCode="no_endpoint";
+        Check(!neverOpened.StartSkin(false,true).Success && neverOpened.Waits==6 && neverOpened.Calls.Count==0,
+            "a genuinely unopened interface gets bounded retries without launching or restarting Codex");
+        var connectionCache=new ConnectionProbeService(Path.Combine(root,"connection-cache"));
+        Check(!connectionCache.GetState().CdpReady && connectionCache.Probes==1,"an unavailable endpoint is cached briefly");
+        connectionCache.Connection=new RuntimeConnection {Ready=true,Code="ready",Port=9335,BrowserId="fresh-browser"};
+        Thread.Sleep(650);
+        Check(connectionCache.GetState().CdpReady && connectionCache.Probes==2,
+            "an endpoint that becomes available is detected before the previous five-second failure cache expires");
 
         var closed=NewService("closed"); closed.State=new ControllerState();
         Check(closed.ApplyTheme(b,false).Success && closed.Calls[1].StartsWith("start-dream-skin.ps1"),"selected saved theme starts even if Codex was closed");
@@ -255,6 +310,24 @@ internal static class ControllerBehaviorTests
         Check(off.PauseSkin().Success && off.Calls.Single().Contains("-RemoveSkin"),"off command removes and verifies live skin");
         var failedOff=NewService("failed-off"); failedOff.Failure=2;
         Check(!failedOff.PauseSkin().Success,"failed removal verification is reported as failure");
+        var serialOff=NewService("serial-toggle"); var serialOn=NewService("serial-toggle");
+        using(var removeEntered=new ManualResetEventSlim(false))
+        using(var releaseRemoval=new ManualResetEventSlim(false))
+        using(var enableRequested=new ManualResetEventSlim(false))
+        using(var enableEntered=new ManualResetEventSlim(false)) {
+            serialOff.BeforeRun=delegate(string script,string[] commandArgs){removeEntered.Set(); if(!releaseRemoval.Wait(5000))throw new Exception("test removal timed out");};
+            serialOn.BeforeRun=delegate(string script,string[] commandArgs){enableEntered.Set();};
+            var offTask=Task.Run(()=>serialOff.PauseSkin());
+            Check(removeEntered.Wait(3000),"closing reaches live removal inside the controller transaction");
+            var onTask=Task.Run(()=>{enableRequested.Set();return serialOn.StartSkin(false,true);});
+            Check(enableRequested.Wait(1000) && !enableEntered.Wait(150) && File.Exists(Path.Combine(serialOff.StateRoot,"paused")),
+                "a separate controller cannot clear the pause or apply while removal is still running");
+            releaseRemoval.Set();
+            Check(offTask.GetAwaiter().GetResult().Success && onTask.GetAwaiter().GetResult().Success &&
+                serialOff.Calls.Single().Contains("-RemoveSkin") && serialOn.Calls.Single().Contains("-ApplyCurrentTheme") &&
+                !File.Exists(Path.Combine(serialOff.StateRoot,"paused")),
+                "serialized close then enable preserves the requested final state and live watcher");
+        }
         var failedApply=NewService("failed-apply"); failedApply.Failure=2;
         Check(!failedApply.ApplyTheme(b,false).Success && failedApply.Calls.Count==1,"failed theme preparation does not start another skin");
 
@@ -405,4 +478,11 @@ internal static class ControllerBehaviorTests
 internal sealed class ProcessProbeService : ControllerService {
     internal ProcessProbeService(string root):base(root){}
     internal ProcessResult Invoke(string script){return base.RunPowerShell(script,new string[0],15000);}
+}
+
+internal sealed class ConnectionProbeService : ControllerService {
+    internal int Probes;
+    internal RuntimeConnection Connection=new RuntimeConnection {Code="no_endpoint",Port=9335};
+    internal ConnectionProbeService(string root):base(root){}
+    protected override RuntimeConnection DiscoverConnection(int preferredPort){Probes++;return Connection;}
 }
