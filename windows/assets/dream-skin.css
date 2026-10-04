@@ -829,3 +829,10 @@ html.codex-dream-skin.dream-theme-light.dream-art-visibility-clear.dream-art-wid
   -webkit-backdrop-filter: blur(24px) saturate(1.35) !important;
   backdrop-filter: blur(24px) saturate(1.35) !important;
 }
+
+/* Current Codex places a separate tinted sheet inside the sidebar. The glass
+   belongs to the outer panel; clear only this full-height navigation wrapper. */
+html.codex-dream-skin aside.app-shell-left-panel .sidebar-navigation,
+html.codex-dream-skin aside.app-shell-left-panel [data-slate-sidebar-content] {
+  background: transparent !important;
+}
