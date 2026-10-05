@@ -2,7 +2,7 @@
 
 把本机 **Wallpaper Engine 壁纸库**接入 **Codex Desktop**，通过原生 Windows 控制器选择、切换和关闭背景。
 
-这是基于 [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin) 的独立扩展，控制器版本 **3.6.4**。软件不是 OpenAI、Valve 或 Wallpaper Engine 的官方产品。[English](README.en.md)
+这是基于 [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin) 的独立扩展，控制器版本 **3.6.5**。软件不是 OpenAI、Valve 或 Wallpaper Engine 的官方产品。[English](README.en.md)
 
 ## 功能
 
@@ -15,6 +15,7 @@
 - 带缩略图的原生 WinForms 控制器、自定义图标、关闭皮肤和可选登录启动。
 - 自动发现本机连接与新版安装位置；重新绑定变更的会话，后台检查进程和连接、定期验证背景，失败时退避恢复。
 - 不复制大视频或场景包。屏幕外辅助窗口保持静音，不抢焦点、置顶或显示在任务栏。
+- 壁纸启动、设置、关闭命令检查退出状态和超时；窗口或进程失效时立即安全暂停，持久保留失败来源，防止后台服务或换回同一壁纸再次循环报错。
 
 ## 要求与限制
 
@@ -63,6 +64,14 @@
 - 新下载的壁纸可刷新库。预设缺少原壁纸资源时，先在 Wallpaper Engine 下载相应原壁纸。
 
 动态媒体接口只监听 `127.0.0.1` 并要求运行时随机令牌，图像帧经过内存。壁纸只从经过验证的本机库路径读取。不要把本机调试端口转发到网络，也不要公开 `%LOCALAPPDATA%\CodexDreamSkin` 的状态、日志或令牌。
+
+## 壁纸故障与安全
+
+安全暂停会写入 `paused` 和 `control\motion-safety.json`。列表保留故障壁纸并说明原因；选择正常的其他壁纸可以继续使用，故障记录不会因为切换、重启控制器或后台恢复而自动清除。窗口归属无法确认或定向关闭失败时会暂停所有后续窗口操作。请先检查原壁纸和 Wallpaper Engine，确认故障解决后再人工审核故障记录；不要反复清除记录重试。
+
+预设按原项目的属性定义校验类型、范围、选项和附加资源路径，拒绝网络路径、重解析点、备用数据流及控制字符。原生设置分为每批不超过 1536 UTF-8 字节的 JSON，等待窗口稳定并产生可用帧后才应用。媒体请求同时最多 8 个，请求行、请求头和配置大小均有限制。命令采用正在运行的 Wallpaper Engine 架构及其安装目录，只定向操作本进程的随机辅助窗口。详见 [安全设计与审核范围](SECURITY.md) 和 [Wallpaper Engine 官方命令文档](https://help.wallpaperengine.io/en/functionality/cli.html)。
+
+这些保护能阻止失败循环，不能修补第三方壁纸或 Wallpaper Engine 的原生崩溃；触发原生崩溃的壁纸会被隔离。场景和网页内容由本机 Wallpaper Engine 执行，桥接器没有提供额外的内容沙箱。
 
 ## 开发与验证
 

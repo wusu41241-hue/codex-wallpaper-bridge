@@ -290,6 +290,11 @@ namespace CodexDreamSkinController
                 }
             }
             result.AddRange(WallpaperCatalog.Discover());
+            foreach (var item in result) {
+                if (item.Source != "wallpaper" || !String.IsNullOrEmpty(item.UnavailableReason)) continue;
+                string blocked=WallpaperSafety.BlockedMessage(stateRoot,item.MediaPath);
+                if (blocked != null) item.UnavailableReason="安全暂停："+blocked;
+            }
             result.Sort(delegate(ThemeItem left, ThemeItem right)
             {
                 int source = String.Compare(left.Source, right.Source, StringComparison.OrdinalIgnoreCase);
@@ -389,6 +394,15 @@ namespace CodexDreamSkinController
         private StartResult StartRuntimeCore(bool startPaused, bool silent, bool preservePause, bool applyCurrentTheme)
         {
             if (!PrerequisitesReady) return StartResult.Fail("Dream Skin 运行时或工程入口不完整。");
+            if (!startPaused) {
+                var selectedTheme = ReadJsonObject(Path.Combine(stateRoot,"active-theme","theme.json"));
+                object selectedMotion;
+                var motion = selectedTheme != null && selectedTheme.TryGetValue("motion",out selectedMotion) ? selectedMotion as Dictionary<string,object> : null;
+                if (motion != null) {
+                    string blocked = WallpaperSafety.BlockedMessage(stateRoot,GetString(motion,"source",""));
+                    if (blocked != null) return StartResult.Fail("壁纸已被安全暂停："+blocked+" 请改选其他壁纸后再启用。");
+                }
+            }
             ControllerState before = GetReadyState();
             if (preservePause && (before.Paused || File.Exists(pauseFile))) return StartResult.Ok("皮肤保持关闭。", false);
             if (!before.CdpReady && before.CodexRunning)
@@ -493,6 +507,10 @@ namespace CodexDreamSkinController
         {
             if (item == null) return StartResult.Fail("请先选择主题。");
             if (!String.IsNullOrEmpty(item.UnavailableReason)) return StartResult.Fail(item.UnavailableReason);
+            if (String.Equals(item.Source,"wallpaper",StringComparison.OrdinalIgnoreCase)) {
+                string blocked = WallpaperSafety.BlockedMessage(stateRoot,item.MediaPath);
+                if (blocked != null) return StartResult.Fail("这张壁纸已被安全暂停："+blocked+" 请改选其他壁纸。");
+            }
             ControllerState state = GetReadyState();
             if (state.CodexRunning && !state.CdpReady)
             {
@@ -592,7 +610,9 @@ namespace CodexDreamSkinController
             ControllerState state = GetState();
             Dictionary<string, object> report = new Dictionary<string, object>();
             report["status"] = PrerequisitesReady ? "pass" : "fail";
-            report["controller_version"] = "3.6.4";
+            report["controller_version"] = "3.6.5";
+            report["wallpaper_safety_guard"] = true;
+            report["persistent_source_quarantine"] = true;
             report["automatic_recovery"] = true;
             report["injector_session_matches"] = state.InjectorSessionMatches;
             report["periodic_readonly_render_check"] = true;
@@ -1099,7 +1119,7 @@ namespace CodexDreamSkinController
             Controls.Add(autoStart);
 
             Label version = new Label();
-            version.Text = "控制器 3.6.4 · Wallpaper";
+            version.Text = "控制器 3.6.5 · Wallpaper";
             version.Location = new Point(682, 606);
             version.AutoSize = true;
             version.ForeColor = Color.FromArgb(121, 138, 157);

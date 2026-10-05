@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([string]$OutputDirectory = (Join-Path $PSScriptRoot '..\..\..\artifacts'))
 
 $ErrorActionPreference = 'Stop'
@@ -17,7 +17,7 @@ $arguments = @(
   '/reference:System.dll', '/reference:System.Core.dll', '/reference:System.Drawing.dll',
   '/reference:System.Windows.Forms.dll', '/reference:System.Web.Extensions.dll'
 )
-foreach ($source in @('CodexDreamSkinController.cs', 'WallpaperCatalog.cs', 'MotionHost.cs', 'RuntimeConnection.cs', 'RecoveryAgent.cs')) {
+foreach ($source in @('CodexDreamSkinController.cs', 'WallpaperCatalog.cs', 'WallpaperSafety.cs', 'MotionHost.cs', 'RuntimeConnection.cs', 'RecoveryAgent.cs')) {
   $arguments += Join-Path $PSScriptRoot $source
 }
 & $compiler @arguments

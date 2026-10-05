@@ -61,8 +61,86 @@ internal static class ControllerBehaviorTests
     }
     [STAThread] static int Main(string[] args) {
         if(args.Length>0 && args[0]=="--hold-pipes"){Thread.Sleep(10000);return 0;}
+        if(args.Length>1 && args[0]=="--exit-code"){return Int32.Parse(args[1]);}
         if(args.Length==0) throw new ArgumentException("Pass an isolated test-state directory.");
         root=args[0]; Directory.CreateDirectory(root);
+        string safetyRoot=Path.Combine(root,"safety-inputs");Directory.CreateDirectory(safetyRoot);
+        string safeProject=Path.Combine(safetyRoot,"project.json");
+        File.WriteAllText(safeProject,"{\"general\":{\"properties\":{\"enabled\":{\"type\":\"bool\"},\"speed\":{\"type\":\"slider\",\"min\":0,\"max\":2},\"choice\":{\"type\":\"combo\",\"options\":[{\"value\":\"1\"}]},\"tint\":{\"type\":\"color\"},\"label\":{\"type\":\"text\"},\"caption\":{\"type\":\"textinput\"}}}}");
+        var normalized=WallpaperSafety.NormalizeProperties(safeProject,new Dictionary<string,object>{{"enabled",true},{"speed",1.5},{"choice","1"},{"tint","0.1 0.2 0.3"},{"caption","文字"},{"label","editor-only"},{"unknown",42}});
+        Check(normalized.Count==5 && !normalized.ContainsKey("label") && !normalized.ContainsKey("unknown"),"only typed project-defined writable properties reach native commands");
+        foreach(var invalid in new[]{
+            new Dictionary<string,object>{{"enabled","false"}},new Dictionary<string,object>{{"speed",Double.NaN}},
+            new Dictionary<string,object>{{"speed",99}},new Dictionary<string,object>{{"choice","invalid"}},
+            new Dictionary<string,object>{{"tint","-1 1 1"}},new Dictionary<string,object>{{"caption","line\ncommand"}},
+            new Dictionary<string,object>{{"caption",new string('x',513)}},new Dictionary<string,object>{{"-control",true}}
+        }) {
+            bool rejected=false;try{WallpaperSafety.NormalizeProperties(safeProject,invalid);}catch(InvalidOperationException){rejected=true;}
+            Check(rejected,"unsafe preset type, range, text or property name is rejected before native invocation");
+        }
+        Check(WallpaperSafety.IsRegularLocalFile(safeProject) && !WallpaperSafety.IsRegularLocalFile(@"\\server\share\project.json") &&
+            !WallpaperSafety.IsRegularLocalFile(safeProject+":extra"),"wallpaper resources cannot use remote paths or alternate data streams");
+        Check(WallpaperSafety.QuoteArgument(@"F:\wallpaper folder\")=="\"F:\\wallpaper folder\\\\\"", "native path arguments correctly escape a trailing backslash");
+        bool unsafeArgument=false;try{WallpaperSafety.QuoteArgument("asset\r-command");}catch(InvalidOperationException){unsafeArgument=true;}
+        Check(unsafeArgument,"native argument control characters cannot inject another command");
+        var manyProperties=new Dictionary<string,object>();for(int n=0;n<120;n++)manyProperties["p"+n]=new string('a',40);
+        var batches=WallpaperSafety.PropertyBatches(MotionHost.PropertiesJson(manyProperties));
+        Check(batches.Count>1 && batches.All(batch=>System.Text.Encoding.UTF8.GetByteCount(batch)<=1536 && batch.Contains("\"volume\":0")),
+            "large presets are split into bounded settings messages that remain muted and valid JSON");
+        int recoveredProperties=0;foreach(string batch in batches)recoveredProperties+=new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string,object>>(batch).Count-1;
+        Check(recoveredProperties==120,"bounded settings batches preserve every validated property exactly once");
+        string thisExe=Process.GetCurrentProcess().MainModule.FileName;
+        Check(MotionHost.RunEngineCommand(new ProcessStartInfo(thisExe,"--exit-code 0"),2000) &&
+            !MotionHost.RunEngineCommand(new ProcessStartInfo(thisExe,"--exit-code 7"),2000),"native command failures cannot be mistaken for successful wallpaper loading");
+        var commandDeadline=Stopwatch.StartNew();
+        Check(!MotionHost.RunEngineCommand(new ProcessStartInfo(thisExe,"--hold-pipes"),80) && commandDeadline.ElapsedMilliseconds<2000,
+            "a stuck temporary command is cancelled without an unbounded retry or desktop renderer termination");
+        int lineBudget=20;bool oversizedLine=false;
+        using(var oversized=new MemoryStream(System.Text.Encoding.ASCII.GetBytes(new string('x',30))))try{MotionHost.ReadBoundedLine(oversized,8,ref lineBudget);}catch(InvalidDataException){oversizedLine=true;}
+        Check(oversizedLine,"local request lines are bounded while reading rather than after allocation");
+        var safetyService=NewService("persistent-safety");File.WriteAllText(Path.Combine(safetyService.WallpaperControlRoot,"motion-token.txt"),new string('a',64));
+        var safetyHost=(MotionHost)typeof(MotionHost).GetConstructor(BindingFlags.NonPublic|BindingFlags.Instance,null,new[]{typeof(ControllerService)},null).Invoke(new object[]{safetyService});
+        var blockedSource=new MotionHost.MotionSource {Kind="scene",Path=safeProject,Properties=MotionHost.PropertiesJson(null)};
+        safetyHost.UpdateValidatedSource(blockedSource);
+        Directory.CreateDirectory(Path.Combine(safetyService.StateRoot,"active-theme"));
+        File.WriteAllText(Path.Combine(safetyService.StateRoot,"active-theme","theme.json"),new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new Dictionary<string,object>{{"motion",new Dictionary<string,object>{{"source",safeProject}}}}));
+        typeof(MotionHost).GetMethod("SuspendForSafety",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(safetyHost,new object[]{"test-failed","Native failure was contained"});
+        Check(File.Exists(Path.Combine(safetyService.StateRoot,"paused")) && WallpaperSafety.BlockedMessage(safetyService.StateRoot,safeProject)!=null,
+            "a wallpaper failure persists a safety pause before another service can retry");
+        safetyService.State.Paused=true;
+        Check(!safetyService.StartSkin(false,true).Success && safetyService.Calls.Count==0,"enabling a quarantined source cannot restart native wallpaper commands");
+        string differentSource=Path.Combine(safetyRoot,"different.mp4");
+        safetyHost.UpdateValidatedSource(new MotionHost.MotionSource {Kind="video",Path=differentSource,Properties=MotionHost.PropertiesJson(null)});
+        Check(WallpaperSafety.BlockedMessage(safetyService.StateRoot,differentSource)==null &&
+            !(bool)typeof(MotionHost).GetField("safetySuspended",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(safetyHost),
+            "a validated different wallpaper can resume without erasing the failed-source quarantine");
+        Check(WallpaperSafety.BlockedMessage(safetyService.StateRoot,safeProject)!=null,"switching away and back cannot erase a failed wallpaper's quarantine");
+        WallpaperSafety.RecordFailure(safetyService.StateRoot,differentSource,"second-failure","Second source failed");
+        Check(WallpaperSafety.BlockedMessage(safetyService.StateRoot,safeProject)!=null && WallpaperSafety.BlockedMessage(safetyService.StateRoot,differentSource)!=null,
+            "failures from multiple wallpapers remain quarantined after later failures");
+        File.WriteAllText(Path.Combine(safetyService.WallpaperControlRoot,"motion-safety.json"),"{}");
+        Check(WallpaperSafety.BlockedMessage(safetyService.StateRoot,differentSource)!=null,"malformed safety records fail closed rather than enabling native retries");
+        bool nonfiniteBatch=false;try{WallpaperSafety.PropertyBatches("{\"speed\":1e100}");}catch(InvalidOperationException){nonfiniteBatch=true;}
+        Check(nonfiniteBatch,"the native message boundary rejects unsafe numbers even without the schema validator");
+        var orphanFlags=BindingFlags.NonPublic|BindingFlags.Instance;
+        typeof(MotionHost).GetField("enginePath",orphanFlags).SetValue(safetyHost,thisExe);
+        using(var orphanForm=new Form {Text="CodexDreamSkinMotion-test"}) {
+            IntPtr orphanHandle=orphanForm.Handle;
+            Check((bool)typeof(MotionHost).GetMethod("HasPreviousHelper",orphanFlags).Invoke(safetyHost,new object[0]),
+                "a remaining owned helper window prevents another native wallpaper layer from opening");
+        }
+        var unsafeCloseService=NewService("unsafe-close");
+        File.WriteAllText(Path.Combine(unsafeCloseService.WallpaperControlRoot,"motion-token.txt"),new string('b',64));
+        var unsafeCloseHost=(MotionHost)typeof(MotionHost).GetConstructor(orphanFlags,null,new[]{typeof(ControllerService)},null).Invoke(new object[]{unsafeCloseService});
+        unsafeCloseHost.UpdateValidatedSource(blockedSource);
+        typeof(MotionHost).GetField("sceneWindow",orphanFlags).SetValue(unsafeCloseHost,new IntPtr(1));
+        unsafeCloseHost.UpdateValidatedSource(new MotionHost.MotionSource {Kind="video",Path=differentSource,Properties=MotionHost.PropertiesJson(null)});
+        Check(WallpaperSafety.BlockedMessage(unsafeCloseService.StateRoot,differentSource)!=null &&
+            ReferenceEquals(typeof(MotionHost).GetField("source",orphanFlags).GetValue(unsafeCloseHost),blockedSource),
+            "an ambiguous old window stops the next source transition and all later native commands");
+        var rawBoundary=WallpaperSafety.PropertyBatches("{\"caption\":\")~END -control closeWallpaper\"}").Single();
+        Check(!rawBoundary.Contains(")~END") && new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string,object>>(rawBoundary)["caption"].Equals(")~END -control closeWallpaper"),
+            "text cannot terminate the native RAW JSON envelope or lose its original value");
         var now = new DateTime(2026,10,3,12,0,0,DateTimeKind.Utc);
         var noPort = RuntimeConnection.DiscoverFromInventory(9335,new List<int>(),null,port=>{throw new Exception("unexpected probe");});
         Check(noPort.Code=="no_endpoint", "a confirmed empty port inventory reports an unopened session");
@@ -205,6 +283,10 @@ internal static class ControllerBehaviorTests
         Check(badFrameReply.StartsWith("HTTP/1.1 400 Bad Request"),"invalid frame identifiers cannot enter the response headers");
         string healthReply=System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/health"));
         Check(healthReply.EndsWith("codex-dream-skin-motion/1"),"the existing media health response remains unchanged");
+        File.WriteAllText(Path.Combine(mediaService.StateRoot,"paused"),"paused");
+        Check(System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/frame?t="+new string('a',64))).StartsWith("HTTP/1.1 503 Service Unavailable"),
+            "a valid media token cannot continue fetching frames after the skin is paused");
+        File.Delete(Path.Combine(mediaService.StateRoot,"paused"));
         string rejectedMetrics=System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/metrics"));
         string metricsReply=System.Text.Encoding.ASCII.GetString(MediaRequest(mediaHost,"/metrics?t="+new string('a',64)));
         Check(rejectedMetrics.StartsWith("HTTP/1.1 403 Forbidden") && metricsReply.Contains("\"captureMsLast\":10") && metricsReply.Contains("\"width\":160") && metricsReply.Contains("\"captureMode\":\"window\"") && !metricsReply.Contains(mediaSource.Path) && !metricsReply.Contains(new string('a',64)),

@@ -44,7 +44,19 @@ namespace CodexDreamSkinController
             }
         }
 
-        internal static string EngineExecutable { get { string root = EngineRoot; string x64 = Path.Combine(root, "wallpaper64.exe"); return File.Exists(x64) ? x64 : Path.Combine(root, "wallpaper32.exe"); } }
+        internal static string EngineExecutable
+        {
+            get {
+                string root = EngineRoot;
+                string x64 = Path.Combine(root,"wallpaper64.exe"), x86 = Path.Combine(root,"wallpaper32.exe");
+                foreach (Process process in Process.GetProcessesByName("wallpaper64").Concat(Process.GetProcessesByName("wallpaper32")))
+                    using (process) try {
+                        string image = process.MainModule.FileName;
+                        if (!process.HasExited && (String.Equals(image,x64,StringComparison.OrdinalIgnoreCase) || String.Equals(image,x86,StringComparison.OrdinalIgnoreCase)) && WallpaperSafety.IsRegularLocalFile(image)) return image;
+                    } catch { }
+                return File.Exists(x64) ? x64 : x86;
+            }
+        }
 
         private static IEnumerable<string> SteamLibraries()
         {
@@ -107,7 +119,7 @@ namespace CodexDreamSkinController
 
         internal static bool IsAllowedSource(string candidate)
         {
-            if (String.IsNullOrWhiteSpace(candidate) || !File.Exists(candidate)) return false;
+            if (!WallpaperSafety.IsRegularLocalFile(candidate)) return false;
             string full = Path.GetFullPath(candidate);
             foreach (string root in ProjectRoots())
             {
@@ -132,7 +144,7 @@ namespace CodexDreamSkinController
                     {
                         string projectFile = Path.Combine(directory, "project.json");
                         if (!File.Exists(projectFile)) continue;
-                        Dictionary<string, object> project = Json.DeserializeObject(File.ReadAllText(projectFile, Encoding.UTF8)) as Dictionary<string, object>;
+                        Dictionary<string, object> project = WallpaperSafety.ReadProject(projectFile);
                         if (project == null) continue;
                         string declaredFile = StringValue(project, "file");
                         string type = StringValue(project, "type").ToLowerInvariant();
@@ -150,21 +162,21 @@ namespace CodexDreamSkinController
                         else if (type == "application") unavailable = "应用壁纸使用独立程序，目前不能嵌入 Codex 背景。";
                         else if (type != "video" && type != "scene" && type != "web") unavailable = "此壁纸类型暂不能作为 Codex 背景。";
                         string mediaPath = type == "video" ? Path.GetFullPath(Path.Combine(directory, declaredFile)) : projectFile;
-                        if (!IsWithin(mediaPath, directory) || !File.Exists(mediaPath)) continue;
+                        if (!IsWithin(mediaPath, directory) || !WallpaperSafety.IsRegularLocalFile(mediaPath)) continue;
                         string extension = Path.GetExtension(mediaPath).ToLowerInvariant();
                         if (type == "video" && extension != ".mp4" && extension != ".webm" && extension != ".m4v") unavailable = "此视频格式暂不能播放。";
                         if (type == "scene" || type == "web")
                         {
                             string resource = declaredFile.Length > 0 ? Path.GetFullPath(Path.Combine(directory, declaredFile)) : Path.Combine(directory, "scene.pkg");
-                            bool packagedScene = type == "scene" && File.Exists(Path.Combine(directory, "scene.pkg"));
-                            if (!IsWithin(resource, directory) || (!File.Exists(resource) && !packagedScene)) unavailable = "壁纸资源不完整，请先在 Wallpaper Engine 中下载完成。";
+                            bool packagedScene = type == "scene" && WallpaperSafety.IsRegularLocalFile(Path.Combine(directory, "scene.pkg"));
+                            if (!IsWithin(resource, directory) || (!WallpaperSafety.IsRegularLocalFile(resource) && !packagedScene)) unavailable = "壁纸资源不完整，请先在 Wallpaper Engine 中下载完成。";
                         }
                         string preview = null;
                         foreach (string name in new string[] { StringValue(project, "preview"), "preview.jpg", "preview.jpeg", "preview.png", "preview.gif" })
                         {
                             if (String.IsNullOrWhiteSpace(name)) continue;
                             string path = Path.Combine(directory, name);
-                            if (IsWithin(path, directory) && File.Exists(path)) { preview = path; break; }
+                            if (IsWithin(path, directory) && WallpaperSafety.IsRegularLocalFile(path) && new FileInfo(path).Length <= 16777216) { preview = path; break; }
                         }
                         string nameText = StringValue(project, "title").Replace('\r', ' ').Replace('\n', ' ').Trim();
                         if (nameText.Length == 0) nameText = Path.GetFileName(directory);
@@ -182,7 +194,7 @@ namespace CodexDreamSkinController
             {
                 try
                 {
-                    var metadata = Json.DeserializeObject(File.ReadAllText(Path.Combine(preset.Directory, "project.json"), Encoding.UTF8)) as Dictionary<string, object>;
+                    var metadata = WallpaperSafety.ReadProject(Path.Combine(preset.Directory, "project.json"));
                     string dependency = StringValue(metadata, "dependency");
                     ThemeItem original = result.FirstOrDefault(item => Path.GetFileName(item.Directory) == dependency &&
                         String.IsNullOrEmpty(item.UnavailableReason) && (item.MediaKind == "video" || item.MediaKind == "scene" || item.MediaKind == "web"));
@@ -193,7 +205,7 @@ namespace CodexDreamSkinController
                     preset.MediaPath = original.MediaPath;
                     preset.IsPreset = true;
                     preset.MotionProperties = new Dictionary<string, object>();
-                    var originalMetadata = Json.DeserializeObject(File.ReadAllText(Path.Combine(original.Directory, "project.json"), Encoding.UTF8)) as Dictionary<string, object>;
+                    var originalMetadata = WallpaperSafety.ReadProject(Path.Combine(original.Directory, "project.json"));
                     var definitions = ObjectValue(ObjectValue(originalMetadata, "general"), "properties");
                     foreach (var property in properties)
                     {
@@ -260,6 +272,9 @@ namespace CodexDreamSkinController
                 String.Equals(candidate.MediaPath, item.MediaPath, StringComparison.OrdinalIgnoreCase));
             if (canonical == null) throw new InvalidOperationException("Wallpaper Engine 壁纸已移动或不可用，请刷新列表。");
             if (!String.IsNullOrEmpty(canonical.UnavailableReason)) throw new InvalidOperationException(canonical.UnavailableReason);
+            if (!IsAllowedSource(canonical.MediaPath)) throw new InvalidOperationException("壁纸路径未通过安全检查。");
+            var safeProperties = WallpaperSafety.NormalizeProperties(canonical.MediaPath, canonical.MotionProperties);
+            WallpaperSafety.PropertyBatches(MotionHost.PropertiesJson(safeProperties));
             string target = Path.Combine(savedThemesRoot, "wallpaper-" + canonical.Id);
             Directory.CreateDirectory(target);
             string poster = Path.Combine(target, "poster.png");
@@ -295,8 +310,8 @@ namespace CodexDreamSkinController
             theme["motion"] = new Dictionary<string, object> {
                 { "kind", canonical.MediaKind }, { "source", canonical.MediaPath }
             };
-            if (canonical.MotionProperties != null)
-                ((Dictionary<string, object>)theme["motion"])["properties"] = canonical.MotionProperties;
+            if (safeProperties.Count > 0)
+                ((Dictionary<string, object>)theme["motion"])["properties"] = safeProperties;
             string control = Path.Combine(Directory.GetParent(savedThemesRoot).FullName, "control");
             Directory.CreateDirectory(control);
             SaveRoots(control);

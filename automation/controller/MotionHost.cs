@@ -21,7 +21,8 @@ namespace CodexDreamSkinController
     internal sealed class MotionHost
     {
         internal const int Port = 47866;
-        private const string WindowName = "CodexDreamSkinMotion";
+        private readonly string WindowName = "CodexDreamSkinMotion-" + Guid.NewGuid().ToString("N").Substring(0,8);
+        private string enginePath;
         private readonly ControllerService service;
         private readonly string token;
         private readonly object sourceLock = new object();
@@ -38,10 +39,14 @@ namespace CodexDreamSkinController
         private int sceneClients;
         private int dirty = 1;
         private volatile bool shuttingDown;
+        private volatile bool safetySuspended;
+        private int activeRequests;
         private DateTime lastClientUtc = DateTime.UtcNow;
         private DateTime lastFrameRequestUtc = DateTime.MinValue;
         private DateTime lastSceneLaunchUtc = DateTime.MinValue;
         private DateTime sceneOpenedUtc = DateTime.MinValue;
+        private DateTime lastEngineCheckUtc = DateTime.MinValue;
+        private bool scenePropertiesApplied;
 
         private MotionHost(ControllerService service)
         {
@@ -100,7 +105,8 @@ namespace CodexDreamSkinController
                         {
                             try {
                                 TcpClient client = listener.AcceptTcpClient();
-                                ThreadPool.QueueUserWorkItem(delegate { HandleClient(client); });
+                                if (Interlocked.Increment(ref activeRequests) > 8) { Interlocked.Decrement(ref activeRequests); client.Close(); continue; }
+                                ThreadPool.QueueUserWorkItem(delegate { try { HandleClient(client); } finally { Interlocked.Decrement(ref activeRequests); } });
                             }
                             catch (SocketException) { if (shuttingDown) return; }
                             catch (ObjectDisposedException) { return; }
@@ -114,7 +120,8 @@ namespace CodexDreamSkinController
                     {
                         if (Interlocked.Exchange(ref dirty, 0) != 0) ReloadSource();
                         MotionSource current = CurrentSource();
-                        bool captureActive = current != null && (Volatile.Read(ref sceneClients) > 0 || (DateTime.UtcNow - lastFrameRequestUtc).TotalSeconds < 2);
+                        bool captureActive = !safetySuspended && !File.Exists(Path.Combine(service.StateRoot, "paused")) &&
+                            current != null && current.Kind != "video" && (Volatile.Read(ref sceneClients) > 0 || (DateTime.UtcNow - lastFrameRequestUtc).TotalSeconds < 2);
                         long nowTicks = Stopwatch.GetTimestamp();
                         if (captureActive && nowTicks >= nextCaptureAt)
                         {
@@ -165,15 +172,17 @@ namespace CodexDreamSkinController
 
         private void ReloadSource()
         {
+            string requestedPath = "";
             try
             {
                 string file = Path.Combine(service.StateRoot, "active-theme", "theme.json");
-                Dictionary<string, object> theme = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(file, Encoding.UTF8)) as Dictionary<string, object>;
+                Dictionary<string, object> theme = WallpaperSafety.ReadProject(file);
                 object motionValue;
                 Dictionary<string, object> motion = theme != null && theme.TryGetValue("motion", out motionValue)
                     ? motionValue as Dictionary<string, object> : null;
                 string kind = motion != null && motion.ContainsKey("kind") ? Convert.ToString(motion["kind"]) : "";
                 string path = motion != null && motion.ContainsKey("source") ? Convert.ToString(motion["source"]) : "";
+                requestedPath = path;
                 MotionSource next = null;
                 if ((kind == "video" || kind == "scene" || kind == "web") && WallpaperCatalog.IsAllowedSource(path))
                 {
@@ -183,13 +192,16 @@ namespace CodexDreamSkinController
                     {
                         object propertiesValue;
                         var properties = motion.TryGetValue("properties", out propertiesValue) ? propertiesValue as Dictionary<string, object> : null;
-                        next = new MotionSource { Kind = kind, Path = Path.GetFullPath(path), Properties = PropertiesJson(properties) };
+                        next = new MotionSource { Kind = kind, Path = Path.GetFullPath(path),
+                            Properties = PropertiesJson(WallpaperSafety.NormalizeProperties(path, properties)) };
+                        WallpaperSafety.PropertyBatches(next.Properties);
                     }
                 }
+                if (motion != null && next == null) throw new InvalidOperationException("动态壁纸类型或本地资源路径未通过安全检查。");
                 UpdateValidatedSource(next);
             }
             catch (IOException) { Interlocked.Exchange(ref dirty, 1); }
-            catch (Exception error) { service.Log("motion source invalid: " + error.GetType().Name); }
+            catch (Exception error) { SuspendSourceForSafety("invalid-source", error.Message, requestedPath); }
         }
 
         // ReloadSource applies the fixed library whitelist and supported-file
@@ -199,8 +211,15 @@ namespace CodexDreamSkinController
         {
             MotionSource previous = CurrentSource();
             if (SameSource(previous, next)) return;
+            bool wasSuspended = safetySuspended;
             if (previous != null) CloseSceneWindow();
+            if (!wasSuspended && safetySuspended) return;
             lock (sourceLock) source = next;
+            safetySuspended = next != null && WallpaperSafety.BlockedMessage(service.StateRoot,next.Path) != null;
+            lastSceneLaunchUtc = DateTime.MinValue;
+            if (safetySuspended) {
+                File.WriteAllText(Path.Combine(service.StateRoot,"paused"),"paused by persistent wallpaper safety guard",new UTF8Encoding(false));
+            }
             if (next != null) service.Log("motion source: " + next.Kind);
         }
 
@@ -213,8 +232,8 @@ namespace CodexDreamSkinController
                 try
                 {
                     NetworkStream stream = client.GetStream();
-                    StreamReader reader = new StreamReader(stream, Encoding.ASCII, false, 2048, true);
-                    string request = reader.ReadLine();
+                    int headerBudget = 8192;
+                    string request = ReadBoundedLine(stream, 1024, ref headerBudget);
                     if (String.IsNullOrEmpty(request) || request.Length > 1024) return;
                     string[] parts = request.Split(' ');
                     if (parts.Length != 3 || parts[2] != "HTTP/1.1") return;
@@ -222,7 +241,7 @@ namespace CodexDreamSkinController
                     string range = "";
                     for (int index = 0; index < 32; index++)
                     {
-                        string line = reader.ReadLine();
+                        string line = ReadBoundedLine(stream, 2048, ref headerBudget);
                         if (line == null || line.Length > 2048) return;
                         if (line.Length == 0) break;
                         if (line.StartsWith("Host:", StringComparison.OrdinalIgnoreCase)) host = line.Substring(5).Trim();
@@ -237,6 +256,7 @@ namespace CodexDreamSkinController
                     if (parts[0] == "OPTIONS" && (route == "/video" || route == "/scene" || route == "/frame"))
                     { ReplyOptions(stream); return; }
                     if (parts[0] == "GET" && route == "/metrics") { ServeMetrics(stream); return; }
+                    if (safetySuspended || File.Exists(Path.Combine(service.StateRoot,"paused"))) { Reply(stream,503,"Wallpaper playback paused"); return; }
                     MotionSource current = CurrentSource();
                     if (current == null) { Reply(stream, 404, "No active motion theme"); return; }
                     if (parts[0] == "GET" && route == "/frame")
@@ -307,7 +327,7 @@ namespace CodexDreamSkinController
                     "Cross-Origin-Resource-Policy: cross-origin\r\nConnection: close\r\n\r\n");
                 stream.Write(prefix, 0, prefix.Length);
                 string sent = null;
-                while (CurrentSource() == expected)
+                while (!shuttingDown && !safetySuspended && !File.Exists(Path.Combine(service.StateRoot,"paused")) && CurrentSource() == expected)
                 {
                     FrameSnapshot snapshot = Volatile.Read(ref latestFrame);
                     if (!UsableFrame(snapshot, expected, sent)) { Thread.Sleep(10); continue; }
@@ -367,6 +387,7 @@ namespace CodexDreamSkinController
                 { "height", snapshot == null ? 0 : snapshot.Height },
                 { "captureMode", snapshot == null ? "none" : snapshot.ClientArea ? "client" : "window" },
                 { "targetFps", TargetFramesPerSecond }
+                ,{ "safetySuspended", safetySuspended }
             }));
             byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n");
             stream.Write(header, 0, header.Length);
@@ -375,25 +396,36 @@ namespace CodexDreamSkinController
 
         private void EnsureSceneWindow()
         {
+            if (safetySuspended) return;
             if (sceneWindow != IntPtr.Zero && IsWindow(sceneWindow))
             {
-                if (!ParkSceneWindow()) CloseSceneWindow();
+                if ((DateTime.UtcNow-lastEngineCheckUtc).TotalSeconds >= 1) {
+                    lastEngineCheckUtc=DateTime.UtcNow;
+                    if (!EngineRunning() || !OwnedSceneWindow(sceneWindow,sceneOwnerPid)) { SuspendForSafety("engine-exited", "Wallpaper Engine 或渲染窗口意外退出，已停止该壁纸并禁止自动重试。"); return; }
+                }
+                if (!ParkSceneWindow()) SuspendForSafety("isolation-failed", "壁纸辅助窗口隔离检查失败，已停止自动重试。");
                 return;
             }
+            if (sceneWindow != IntPtr.Zero) { SuspendForSafety("renderer-exited", "壁纸窗口意外退出，已停止对该壁纸重复启动。"); return; }
             if ((DateTime.UtcNow - lastSceneLaunchUtc).TotalSeconds < 5) return;
             lastSceneLaunchUtc = DateTime.UtcNow;
             MotionSource current = CurrentSource();
-            if (current == null || !File.Exists(WallpaperCatalog.EngineExecutable)) return;
+            if (current == null) return;
+            enginePath = WallpaperCatalog.EngineExecutable;
+            if (!WallpaperSafety.IsRegularLocalFile(enginePath)) { SuspendForSafety("engine-unavailable", "Wallpaper Engine 程序未通过本地文件检查，已停止命令。"); return; }
+            if (!EngineRunning()) { SuspendForSafety("engine-unavailable", "Wallpaper Engine 未运行，已停止自动启动命令。"); return; }
+            if (HasPreviousHelper()) { SuspendSourceForSafety("orphan-window", "检测到旧皮肤辅助窗口仍在运行，已暂停新窗口启动，防止叠加壁纸。", ""); return; }
+            if (FindWindow(null,WindowName) != IntPtr.Zero) { SuspendForSafety("window-collision", "壁纸辅助窗口标识冲突，已停止启动。"); return; }
             ProcessStartInfo info = new ProcessStartInfo();
-            info.FileName = WallpaperCatalog.EngineExecutable;
+            info.FileName = enginePath;
             Point parking = CaptureParkingPoint(PhysicalDesktopBounds());
-            info.Arguments = "-control openWallpaper -file \"" + current.Path.Replace("\"", "") + "\" -playInWindow " +
-                WindowName + " -width 1600 -height 900 -x " + parking.X.ToString(CultureInfo.InvariantCulture) +
+            info.Arguments = "-control openWallpaper -file " + WallpaperSafety.QuoteArgument(current.Path) + " -playInWindow " +
+                WallpaperSafety.QuoteArgument(WindowName) + " -width 1600 -height 900 -x " + parking.X.ToString(CultureInfo.InvariantCulture) +
                 " -y " + parking.Y.ToString(CultureInfo.InvariantCulture) + " -borderless";
             info.UseShellExecute = false;
             info.CreateNoWindow = true;
             info.WindowStyle = ProcessWindowStyle.Hidden;
-            using (Process control = Process.Start(info)) control.WaitForExit(5000);
+            if (!RunEngineCommand(info, 5000)) { SuspendForSafety("open-command-failed", "Wallpaper Engine 打开命令失败或超时，已停止重试。"); return; }
             for (int attempt = 0; attempt < 30; attempt++)
             {
                 IntPtr candidate = FindWindow(null, WindowName);
@@ -404,7 +436,7 @@ namespace CodexDreamSkinController
                         GetWindowThreadProcessId(candidate, out pid);
                         using (Process owner = Process.GetProcessById((int)pid))
                         {
-                            if (!String.Equals(owner.MainModule.FileName, WallpaperCatalog.EngineExecutable, StringComparison.OrdinalIgnoreCase)) return;
+                            if (!String.Equals(owner.MainModule.FileName, enginePath, StringComparison.OrdinalIgnoreCase)) { SuspendForSafety("window-identity-failed", "壁纸窗口归属未通过验证，已停止重试。"); return; }
                         }
                         sceneWindow = candidate;
                         sceneOwnerPid = pid;
@@ -412,27 +444,28 @@ namespace CodexDreamSkinController
                         if (!ParkSceneWindow())
                         {
                             service.Log("wallpaper capture window could not be isolated; closing it");
-                            CloseSceneWindow();
+                            SuspendForSafety("isolation-failed", "壁纸辅助窗口未能安全停靠，已停止重试。");
                             return;
                         }
                         sceneOpenedUtc = DateTime.UtcNow;
-                        ProcessStartInfo mute = new ProcessStartInfo(WallpaperCatalog.EngineExecutable,
-                            "-control applyProperties -location " + WindowName + " -properties RAW~(" + current.Properties + ")~END");
-                        mute.UseShellExecute = false; mute.CreateNoWindow = true; mute.WindowStyle = ProcessWindowStyle.Hidden;
-                        using (Process control = Process.Start(mute)) control.WaitForExit(3000);
+                        scenePropertiesApplied=false;
+                        lastEngineCheckUtc=DateTime.UtcNow;
                         return;
                     }
-                    catch { }
+                    catch { SuspendForSafety("window-identity-failed", "壁纸窗口的进程身份无法确认，已停止重试。"); return; }
                 }
                 Thread.Sleep(100);
             }
+            SuspendForSafety("window-timeout", "壁纸窗口未在规定时间内就绪，已停止自动重试。");
         }
 
         private void CaptureSceneFrame()
         {
             if (sceneWindow == IntPtr.Zero || !IsWindow(sceneWindow)) return;
-            if (!ParkSceneWindow()) { CloseSceneWindow(); return; }
-            if ((DateTime.UtcNow - sceneOpenedUtc).TotalMilliseconds < 500) return;
+            if (!ParkSceneWindow()) { SuspendForSafety("isolation-failed", "壁纸辅助窗口失去安全隔离，已停止捕获与重试。"); return; }
+            // A native window can exist while the wallpaper is still loading.
+            // Do not send settings or print messages during its startup phase.
+            if ((DateTime.UtcNow - sceneOpenedUtc).TotalSeconds < 2) return;
             MotionSource expected = CurrentSource();
             if (expected == null) return;
             RECT rectangle = new RECT();
@@ -460,6 +493,15 @@ namespace CodexDreamSkinController
                 if (!PrintCapture(2U)) return;
             }
             byte[] bytes = captureBuffer.EncodeJpeg();
+            if (!scenePropertiesApplied) {
+                foreach (string properties in WallpaperSafety.PropertyBatches(expected.Properties)) {
+                    if (!OwnedSceneWindow(sceneWindow,sceneOwnerPid) || !EngineRunning()) { SuspendForSafety("renderer-exited", "设置壁纸前检测到渲染窗口失效，已停止命令。"); return; }
+                    ProcessStartInfo update = new ProcessStartInfo(enginePath,
+                        "-control applyProperties -location " + WallpaperSafety.QuoteArgument(WindowName) + " -properties RAW~(" + properties + ")~END");
+                    if (!RunEngineCommand(update,3000)) { SuspendForSafety("properties-command-failed", "壁纸设置命令失败，已停止自动重试。"); return; }
+                }
+                scenePropertiesApplied=true;
+            }
             long elapsedTicks = Stopwatch.GetTimestamp() - startedAt;
             if (CurrentSource() != expected) return;
             long sequence = Interlocked.Increment(ref frameSequence);
@@ -477,23 +519,100 @@ namespace CodexDreamSkinController
 
         private void CloseSceneWindow()
         {
+            IntPtr previousWindow = sceneWindow;
+            uint previousOwner = sceneOwnerPid;
             captureMode.Reset();
             Volatile.Write(ref latestFrame, null);
             if (captureBuffer != null) { captureBuffer.Dispose(); captureBuffer = null; }
             if (sceneWindow == IntPtr.Zero) return;
             sceneWindow = IntPtr.Zero;
             sceneOwnerPid = 0;
-            if (!File.Exists(WallpaperCatalog.EngineExecutable)) return;
+            if (safetySuspended) return;
+            if (!OwnedSceneWindow(previousWindow,previousOwner) || !EngineRunning()) {
+                if (!shuttingDown) SuspendSourceForSafety("unsafe-close", "原壁纸窗口无法安全关闭，已暂停后续壁纸切换。", "");
+                return;
+            }
             try
             {
-                ProcessStartInfo info = new ProcessStartInfo(WallpaperCatalog.EngineExecutable,
-                    "-control closeWallpaper -location " + WindowName);
+                ProcessStartInfo info = new ProcessStartInfo(enginePath,
+                    "-control closeWallpaper -location " + WallpaperSafety.QuoteArgument(WindowName));
                 info.UseShellExecute = false;
                 info.CreateNoWindow = true;
                 info.WindowStyle = ProcessWindowStyle.Hidden;
-                using (Process control = Process.Start(info)) control.WaitForExit(5000);
+                if (!RunEngineCommand(info, 5000) && !shuttingDown) SuspendSourceForSafety("close-command-failed", "壁纸关闭命令失败，已停止后续窗口命令。", "");
             }
             catch { }
+        }
+
+        private bool EngineRunning()
+        {
+            try {
+                foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(enginePath)))
+                    using (process) if (!process.HasExited && String.Equals(process.MainModule.FileName, enginePath, StringComparison.OrdinalIgnoreCase)) return true;
+            } catch { }
+            return false;
+        }
+
+        private bool OwnedSceneWindow(IntPtr window, uint expectedOwner)
+        {
+            if (window == IntPtr.Zero || !IsWindow(window) || FindWindow(null, WindowName) != window) return false;
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (owner == 0 || owner != expectedOwner) return false;
+            try { using (Process process = Process.GetProcessById((int)owner))
+                return !process.HasExited && String.Equals(process.MainModule.FileName, enginePath, StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        internal static bool RunEngineCommand(ProcessStartInfo info, int timeout)
+        {
+            info.UseShellExecute = false; info.CreateNoWindow = true; info.WindowStyle = ProcessWindowStyle.Hidden;
+            try {
+            info.WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(info.FileName));
+            using (Process command = Process.Start(info)) {
+                if (command == null) return false;
+                if (!command.WaitForExit(timeout)) {
+                    // Only the temporary command process is cancelled, never the
+                    // running desktop renderer. Every timeout stops further commands.
+                    try { command.Kill(); command.WaitForExit(1000); } catch { }
+                    return false;
+                }
+                return command.ExitCode == 0;
+            } } catch { return false; }
+        }
+
+        private void SuspendForSafety(string code, string message)
+        {
+            var current = CurrentSource();
+            SuspendSourceForSafety(code,message,current == null ? "" : current.Path);
+        }
+
+        private void SuspendSourceForSafety(string code, string message, string failedSource)
+        {
+            if (safetySuspended) return;
+            safetySuspended = true;
+            captureMode.Reset(); Volatile.Write(ref latestFrame, null);
+            if (captureBuffer != null) { captureBuffer.Dispose(); captureBuffer = null; }
+            sceneWindow = IntPtr.Zero; sceneOwnerPid = 0;
+            try {
+            WallpaperSafety.RecordFailure(service.StateRoot,failedSource,code,message);
+            service.Log("wallpaper safety: " + code);
+            } catch { service.Log("wallpaper safety record could not be saved; commands remain suspended"); }
+            // An isolation or ownership failure must not issue a close command
+            // against an ambiguous native window or create another instance.
+        }
+
+        internal static string ReadBoundedLine(Stream stream, int maxLength, ref int budget)
+        {
+            var bytes = new List<byte>();
+            while (true) {
+                if (--budget < 0) throw new InvalidDataException("Request header too large");
+                int value = stream.ReadByte();
+                if (value < 0) return bytes.Count == 0 ? null : Encoding.ASCII.GetString(bytes.ToArray());
+                if (value == 10) break;
+                if (bytes.Count >= maxLength) throw new InvalidDataException("Request line too large");
+                if (value != 13) bytes.Add((byte)value);
+            }
+            return Encoding.ASCII.GetString(bytes.ToArray());
         }
 
         internal static Point CaptureParkingPoint(Rectangle desktop)
@@ -545,7 +664,7 @@ namespace CodexDreamSkinController
         private static void Reply(NetworkStream stream, int status, string message)
         {
             byte[] body = Encoding.UTF8.GetBytes(message);
-            string label = status == 200 ? "OK" : status == 400 ? "Bad Request" : status == 403 ? "Forbidden" : status == 416 ? "Range Not Satisfiable" : "Not Found";
+            string label = status == 200 ? "OK" : status == 400 ? "Bad Request" : status == 403 ? "Forbidden" : status == 416 ? "Range Not Satisfiable" : status == 503 ? "Service Unavailable" : "Not Found";
             byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 " + status + " " + label + "\r\n" +
                 "Content-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n");
             stream.Write(header, 0, header.Length);
@@ -683,6 +802,24 @@ namespace CodexDreamSkinController
                 memory.Dispose();
             }
         }
+        private bool HasPreviousHelper()
+        {
+            var owners=new HashSet<uint>();
+            foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(enginePath)))
+                using (process) try { if (!process.HasExited && String.Equals(process.MainModule.FileName,enginePath,StringComparison.OrdinalIgnoreCase)) owners.Add((uint)process.Id); } catch { }
+            bool found=false;
+            EnumWindows(delegate(IntPtr window,IntPtr parameter) {
+                uint owner;GetWindowThreadProcessId(window,out owner);
+                if (!owners.Contains(owner)) return true;
+                var caption=new StringBuilder(80);GetWindowText(window,caption,caption.Capacity);
+                if (caption.ToString().StartsWith("CodexDreamSkinMotion",StringComparison.Ordinal)) { found=true;return false; }
+                return true;
+            },IntPtr.Zero);
+            return found;
+        }
+        private delegate bool WindowEnumerator(IntPtr window,IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(WindowEnumerator callback,IntPtr parameter);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr window,StringBuilder text,int length);
         [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
         [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }

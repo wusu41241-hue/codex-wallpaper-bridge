@@ -1,6 +1,6 @@
 # Codex Wallpaper Bridge
 
-A native Windows controller that uses locally installed Wallpaper Engine wallpapers as backgrounds in Codex Desktop. Derived from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin). Controller version **3.6.4**. [中文](README.md)
+A native Windows controller that uses locally installed Wallpaper Engine wallpapers as backgrounds in Codex Desktop. Derived from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin). Controller version **3.6.5**. [中文](README.md)
 
 ## Features
 
@@ -14,6 +14,8 @@ A native Windows controller that uses locally installed Wallpaper Engine wallpap
 - Wallpaper Engine renders a muted helper window outside all displays. Authorized frames travel through the existing local debugging connection into a Codex canvas. Large video and scene files remain in their original library.
 
 ## Requirements and limits
+
+Native wallpaper commands now enforce bounded execution and exit checks, matching the already running engine architecture. A failed wallpaper is durably quarantined and the skin is paused; switching away or restarting the controller does not reset its quarantine. Other validated wallpapers remain usable. An ambiguous window identity or failed targeted close pauses all later window operations. Settings are checked against the source schema and sent in batches of at most 1536 UTF-8 bytes after the window is stable and a frame is available. See [SECURITY.md](SECURITY.md) for the audit scope and limits. The bridge cannot repair native engine crashes or sandbox Wallpaper Engine project scripts.
 
 Windows 10/11 x64, Windows .NET Framework 4.x, official Microsoft Store Codex Desktop, Node.js 22+ on PATH, and Steam Wallpaper Engine running with fully downloaded wallpapers.
 
