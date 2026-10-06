@@ -113,15 +113,14 @@ namespace CodexDreamSkinController
                                 ? service.ApplyTheme(WallpaperCatalog.Current(), false)
                                 : service.StartSkin(false, true);
                             service.RecordResult(existingResult);
+                            if (!silent) ControllerWindow.WakeExisting();
                             if (!existingResult.Success && !silent)
                                 MessageBox.Show(existingResult.Message, "Codex Dream Skin", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             return existingResult.Success ? 0 : 2;
                         }
-                        if (!silent)
-                        {
-                            MessageBox.Show("Codex 皮肤控制器已经在运行。", "Codex Dream Skin",
+                        if (!ControllerWindow.WakeExisting())
+                            MessageBox.Show("控制器窗口暂未响应，请稍后再次打开。", "Codex Dream Skin",
                                 MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        }
                         return 0;
                     }
 
@@ -169,6 +168,127 @@ namespace CodexDreamSkinController
             return null;
         }
     }
+
+    // Only an explicitly marked UI belonging to this user and executable can
+    // receive a show request. Background hosts never register this marker.
+    internal static class ControllerWindow
+    {
+        private static readonly string sid = WindowsIdentity.GetCurrent().User.Value;
+        private static readonly string marker = "CodexDreamSkin.Controller.Window.1." + sid;
+        internal static readonly uint ShowMessage = RegisterWindowMessage("CodexDreamSkin.Controller.Show.1." + sid);
+        private static readonly IntPtr markerValue = new IntPtr(1);
+
+        internal static void Register(IntPtr window)
+        {
+            if (window == IntPtr.Zero || ShowMessage == 0 || !SetProp(window, marker, markerValue))
+                throw new InvalidOperationException("无法注册控制器窗口唤醒通道。");
+        }
+
+        internal static void Unregister(IntPtr window)
+        {
+            if (window != IntPtr.Zero) RemoveProp(window, marker);
+        }
+
+        internal static bool IsOwnedWindow(IntPtr window)
+        {
+            if (window == IntPtr.Zero || GetProp(window, marker) != markerValue) return false;
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) == 0 || owner == 0) return false;
+            IntPtr process = OpenProcess(0x1000, false, owner);
+            if (process == IntPtr.Zero) return false;
+            IntPtr token = IntPtr.Zero;
+            try
+            {
+                var path = new StringBuilder(32768);
+                int length = path.Capacity;
+                if (!QueryFullProcessImageName(process, 0, path, ref length) ||
+                    !String.Equals(Path.GetFullPath(path.ToString()), Path.GetFullPath(Application.ExecutablePath), StringComparison.OrdinalIgnoreCase) ||
+                    !OpenProcessToken(process, 8, out token)) return false;
+                using (var identity = new WindowsIdentity(token))
+                    return identity.User != null && identity.User.Value == sid &&
+                        GetProp(window, marker) == markerValue;
+            }
+            catch { return false; }
+            finally
+            {
+                if (token != IntPtr.Zero) CloseHandle(token);
+                CloseHandle(process);
+            }
+        }
+
+        internal static bool RequestShow(IntPtr window)
+        {
+            if (ShowMessage == 0 || !IsOwnedWindow(window)) return false;
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            AllowSetForegroundWindow(owner);
+            return PostMessage(window, ShowMessage, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        internal static bool WakeExisting()
+        {
+            // A second click can arrive just before the first UI creates its HWND.
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                bool requested = false;
+                EnumWindows(delegate(IntPtr window, IntPtr parameter)
+                {
+                    if (!RequestShow(window)) return true;
+                    requested = true;
+                    return false;
+                }, IntPtr.Zero);
+                if (requested) return true;
+                if (attempt < 9) Thread.Sleep(100);
+            }
+            return false;
+        }
+
+        internal static bool Restore(Form form, bool repairOffscreen)
+        {
+            if (form == null || form.IsDisposed || !form.IsHandleCreated || !IsOwnedWindow(form.Handle)) return false;
+            if (!form.Visible) form.Show();
+            if (form.WindowState == FormWindowState.Minimized) form.WindowState = FormWindowState.Normal;
+            if (repairOffscreen && form.WindowState == FormWindowState.Normal)
+            {
+                bool onScreen = false;
+                foreach (Screen screen in Screen.AllScreens)
+                    if (screen.WorkingArea.IntersectsWith(form.Bounds)) { onScreen = true; break; }
+                if (!onScreen)
+                {
+                    Rectangle area = Screen.PrimaryScreen.WorkingArea;
+                    form.Location = new Point(area.Left + Math.Max(0, (area.Width - form.Width) / 2),
+                        area.Top + Math.Max(0, (area.Height - form.Height) / 2));
+                }
+            }
+            // The native call also undoes STARTUPINFO's SW_HIDE after WinForms'
+            // first show, without displaying any background service window.
+            ShowWindow(form.Handle, 5);
+            form.Activate();
+            SetForegroundWindow(form.Handle);
+            return IsWindowVisible(form.Handle);
+        }
+
+        internal static bool Visible(IntPtr window) { return IsWindowVisible(window); }
+
+        private delegate bool EnumWindowCallback(IntPtr window, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr parameter);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessage(string message);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool SetProp(IntPtr window, string name, IntPtr value);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetProp(IntPtr window, string name);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr RemoveProp(IntPtr window, string name);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint owner);
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint processId);
+        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder path, ref int size);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+        [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    }
+
 
     internal class ControllerService
     {
@@ -610,7 +730,7 @@ namespace CodexDreamSkinController
             ControllerState state = GetState();
             Dictionary<string, object> report = new Dictionary<string, object>();
             report["status"] = PrerequisitesReady ? "pass" : "fail";
-            report["controller_version"] = "3.6.6";
+            report["controller_version"] = "3.6.7";
             report["wallpaper_safety_guard"] = true;
             report["persistent_source_quarantine"] = true;
             report["automatic_recovery"] = true;
@@ -1119,7 +1239,7 @@ namespace CodexDreamSkinController
             Controls.Add(autoStart);
 
             Label version = new Label();
-            version.Text = "控制器 3.6.6 · Wallpaper";
+            version.Text = "控制器 3.6.7 · Wallpaper";
             version.Location = new Point(682, 606);
             version.AutoSize = true;
             version.ForeColor = Color.FromArgb(121, 138, 157);
@@ -1138,6 +1258,7 @@ namespace CodexDreamSkinController
             timer.Interval = 3000;
             timer.Tick += delegate { if (operation.CurrentCount > 0) RefreshView(false); };
             Shown += async delegate {
+                ControllerWindow.Restore(this, false);
                 RefreshView(true);
                 timer.Start();
                 if (service.GetState().InjectorRunning) service.EnsureRecoveryAgent();
@@ -1161,6 +1282,29 @@ namespace CodexDreamSkinController
                 }
             };
             FormClosed += delegate { timer.Stop(); timer.Dispose(); operation.Dispose(); if (previewImage.Image != null) previewImage.Image.Dispose(); };
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ControllerWindow.Register(Handle);
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            ControllerWindow.Unregister(Handle);
+            base.OnHandleDestroyed(e);
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (ControllerWindow.ShowMessage != 0 && message.Msg == ControllerWindow.ShowMessage)
+            {
+                ControllerWindow.Restore(this, true);
+                message.Result = IntPtr.Zero;
+                return;
+            }
+            base.WndProc(ref message);
         }
 
         private Button MakeButton(string text, int x, int y, int width, bool primary)

@@ -2,7 +2,7 @@
 
 把本机 **Wallpaper Engine 壁纸库**接入 **Codex Desktop**，通过原生 Windows 控制器选择、切换和关闭背景。
 
-这是基于 [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin) 的独立扩展，控制器版本 **3.6.6**。软件不是 OpenAI、Valve 或 Wallpaper Engine 的官方产品。[English](README.en.md)
+这是基于 [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin) 的独立扩展，控制器版本 **3.6.7**。软件不是 OpenAI、Valve 或 Wallpaper Engine 的官方产品。[English](README.en.md)
 
 ## 功能
 
@@ -13,6 +13,7 @@
 - 普通 **Codex** 桌面与用户开始菜单快捷方式冷启动时预开本地接口，并先保持皮肤关闭；当前会话可随时热启用、热关闭。开关、切换和后台恢复按顺序执行，接口短暂未就绪时重新检测。
 - 采集和传输以 30 FPS 为目标，复用绘图与编码资源，跳过重复帧；接收较慢的窗口不会阻塞其他窗口。已开始播放的隐藏页面暂停传输，恢复可见后继续播放。
 - 带缩略图的原生 WinForms 控制器、自定义图标、关闭皮肤和可选登录启动。
+- 重复点击桌面控制器入口会唤醒同一窗口，恢复隐藏、最小化或移出屏幕的界面；普通打开控制器不触发换肤或重启 Codex。
 - 自动发现本机连接与新版安装位置；重新绑定变更的会话，后台检查进程和连接、定期验证背景，失败时退避恢复。
 - 不复制大视频或场景包。屏幕外辅助窗口保持静音，不抢焦点、置顶或显示在任务栏。
 - 视频也使用受控渲染与 CDP 画布传帧，修复连接后一直等待首帧的问题；不把整个视频送进页面内存，也不关闭 Codex 的媒体地址安全检查。

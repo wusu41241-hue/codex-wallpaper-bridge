@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [switch]$NoShortcuts,
   [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin')
@@ -92,7 +92,7 @@ try {
       Write-Host ("Codex launcher: " + $result.action + " - " + $result.path)
     }
   }
-  Write-Host "Installed Codex Wallpaper Bridge 3.6.4 at $fullStateRoot."
+  Write-Host "Installed Codex Wallpaper Bridge 3.6.7 at $fullStateRoot."
   Write-Host 'Installation finished. Codex has not been started, closed or restarted.'
   Write-Host 'Open the skin controller when ready. Wallpaper Engine must be running for animated backgrounds.'
 } finally {

@@ -497,6 +497,54 @@ internal static class ControllerBehaviorTests
             "missing current-wallpaper metadata returns no selection");
 
         Application.EnableVisualStyles();
+        var reopening=NewService("controller-reopening");
+        using(var form=new MainForm(reopening,false)) {
+            form.ShowInTaskbar=false; form.StartPosition=FormStartPosition.Manual;
+            form.Location=new Point(-3000,-3000); form.Show(); Application.DoEvents();
+            IntPtr window=form.Handle;
+            Check(ControllerWindow.IsOwnedWindow(window) && ControllerWindow.Visible(window),
+                "a user-opened controller registers its own visible UI wake target");
+            int callsBefore=reopening.Calls.Count;
+            form.Hide();
+            Check(!ControllerWindow.Visible(window),"the controller can be hidden before a repeat launch");
+            Check(ControllerWindow.WakeExisting(),"a repeat launch locates only the owned controller UI");
+            Application.DoEvents();
+            Check(form.Visible && ControllerWindow.Visible(window),
+                "a repeat launch restores a hidden controller instead of reporting already running");
+            Check(Screen.AllScreens.Any(x=>x.WorkingArea.IntersectsWith(form.Bounds)),
+                "a reopened controller moves back from an inaccessible screen position");
+            Check(reopening.Calls.Count==callsBefore,
+                "opening the controller again does not apply a skin or restart Codex");
+            form.WindowState=FormWindowState.Minimized; Application.DoEvents();
+            Check(ControllerWindow.RequestShow(window),"the existing minimized controller accepts a show request");
+            Application.DoEvents();
+            Check(form.WindowState==FormWindowState.Normal && ControllerWindow.Visible(window),
+                "a repeat launch restores a minimized controller");
+            using(var unrelated=new Form()) {
+                unrelated.ShowInTaskbar=false; unrelated.StartPosition=FormStartPosition.Manual;
+                unrelated.Location=new Point(-3000,-3000);
+                IntPtr unrelatedWindow=unrelated.Handle;
+                Check(!ControllerWindow.IsOwnedWindow(unrelatedWindow) &&
+                    !ControllerWindow.RequestShow(unrelatedWindow) &&
+                    !ControllerWindow.Restore(unrelated,true) &&
+                    !ControllerWindow.Visible(unrelatedWindow),
+                    "an unmarked window in the same executable stays hidden and receives no wake action");
+                string marker=(string)typeof(ControllerWindow).GetField("marker",BindingFlags.NonPublic|BindingFlags.Static).GetValue(null);
+                typeof(ControllerWindow).GetMethod("SetProp",BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,
+                    new object[]{unrelatedWindow,marker,new IntPtr(2)});
+                Check(!ControllerWindow.IsOwnedWindow(unrelatedWindow) &&
+                    !ControllerWindow.RequestShow(unrelatedWindow) && !ControllerWindow.Visible(unrelatedWindow),
+                    "a wrong UI marker value in the same executable cannot display a background window");
+                ControllerWindow.Unregister(unrelatedWindow);
+            }
+            ControllerWindow.Unregister(window);
+            form.Hide();
+            Check(!ControllerWindow.RequestShow(window) && !ControllerWindow.Restore(form,true) &&
+                !ControllerWindow.Visible(window),
+                "a stale or removed UI marker cannot display the controller");
+            ControllerWindow.Register(window);
+            form.Show(); Application.DoEvents();
+        }
         var gui=NewService("gui");
         SaveTestTheme(gui,"A","Portable Test Alpha"); SaveTestTheme(gui,"B","Portable Test Beta");
         using(var form=new MainForm(gui,false)) {

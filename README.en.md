@@ -1,12 +1,13 @@
 # Codex Wallpaper Bridge
 
-A native Windows controller that uses locally installed Wallpaper Engine wallpapers as backgrounds in Codex Desktop. Derived from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin). Controller version **3.6.6**. [中文](README.md)
+A native Windows controller that uses locally installed Wallpaper Engine wallpapers as backgrounds in Codex Desktop. Derived from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin). Controller version **3.6.7**. [中文](README.md)
 
 ## Features
 
 - Lists downloaded Workshop, user-created and built-in projects across Steam libraries.
 - Animated video, scene and web wallpapers; presets work when the original resources are installed. Application wallpapers are listed with an unsupported reason.
 - Select any wallpaper or follow the current desktop choice. Search, thumbnails, native WinForms UI and an original app icon.
+- Reopening the controller restores its existing hidden, minimized or offscreen window. Opening the ordinary controller entry does not switch the wallpaper or restart Codex; silent commands remain in the background.
 - Switch skins in an existing connectable Codex session. Conversation, Home and Dots transitions retain the last frame and mark the next shell before painting. Hot updates of the same wallpaper reuse the playing canvas.
 - Ordinary **Codex** desktop and user Start Menu shortcuts prepare the local interface on cold start with the skin initially off. Enable and disable the skin at any time in that session. Toggle, theme and background recovery operations run in order; a briefly unavailable endpoint is checked again.
 - Capture and relay target 30 FPS, reuse drawing and encoding resources, and skip duplicate frames. Slow receivers do not block other windows. Established hidden pages pause frame delivery and resume when visible.

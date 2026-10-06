@@ -1,4 +1,4 @@
-# Security design and review — 3.6.6
+# Security design and review — 3.6.7
 
 This is a local wallpaper bridge. The review covers the controller's file, native command, local HTTP and failure recovery boundaries. It is a source review and behavioral regression exercise, not an independent certification or a review of Wallpaper Engine internals.
 
@@ -23,6 +23,7 @@ This is a local wallpaper bridge. The review covers the controller's file, nativ
 - Child commands use no shell, hidden windows and bounded deadlines. Timeout cancellation targets only the temporary command PID. The bridge does not terminate the running desktop renderer as a recovery method.
 - Media listens on IPv4 loopback. Media and metrics require a random 256-bit token; health exposes only a fixed protocol identifier. Metrics expose counters, not paths or credentials.
 - All dynamic wallpapers, including video, use the controlled host capture and CDP frame relay in Owl. The frame token stays in the host, and the renderer receives bounded image frames. The app's native media URL checks are retained; a large movie is not injected as a whole-file Blob.
+- UI activation uses a per-user window marker and a targeted registered message. Before a show request, the executable path and process token SID must match. It neither broadcasts to other applications nor reads their window titles, and media/supervisor processes do not register as controller windows.
 
 ## Failure handling
 
