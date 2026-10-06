@@ -610,7 +610,7 @@ namespace CodexDreamSkinController
             ControllerState state = GetState();
             Dictionary<string, object> report = new Dictionary<string, object>();
             report["status"] = PrerequisitesReady ? "pass" : "fail";
-            report["controller_version"] = "3.6.5";
+            report["controller_version"] = "3.6.6";
             report["wallpaper_safety_guard"] = true;
             report["persistent_source_quarantine"] = true;
             report["automatic_recovery"] = true;
@@ -1119,7 +1119,7 @@ namespace CodexDreamSkinController
             Controls.Add(autoStart);
 
             Label version = new Label();
-            version.Text = "控制器 3.6.5 · Wallpaper";
+            version.Text = "控制器 3.6.6 · Wallpaper";
             version.Location = new Point(682, 606);
             version.AutoSize = true;
             version.ForeColor = Color.FromArgb(121, 138, 157);

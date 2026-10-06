@@ -1,6 +1,6 @@
 # Codex Wallpaper Bridge
 
-A native Windows controller that uses locally installed Wallpaper Engine wallpapers as backgrounds in Codex Desktop. Derived from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin). Controller version **3.6.5**. [中文](README.md)
+A native Windows controller that uses locally installed Wallpaper Engine wallpapers as backgrounds in Codex Desktop. Derived from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin). Controller version **3.6.6**. [中文](README.md)
 
 ## Features
 
@@ -12,6 +12,7 @@ A native Windows controller that uses locally installed Wallpaper Engine wallpap
 - Capture and relay target 30 FPS, reuse drawing and encoding resources, and skip duplicate frames. Slow receivers do not block other windows. Established hidden pages pause frame delivery and resume when visible.
 - Automatic connection discovery, session rebinding, health checks and recovery with backoff.
 - Wallpaper Engine renders a muted helper window outside all displays. Authorized frames travel through the existing local debugging connection into a Codex canvas. Large video and scene files remain in their original library.
+- Videos use the same controlled frame pipeline as scenes and web projects. This fixes the first-frame wait caused by a transport/host mismatch and avoids local media URLs rejected by the app's URL safety policy, without disabling that policy or buffering an entire video in the page.
 
 ## Requirements and limits
 

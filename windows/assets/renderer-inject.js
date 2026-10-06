@@ -797,7 +797,7 @@
     motionFrames: sameMotion ? previous.motionFrames || 0 : 0,
     lastMotionAt: sameMotion ? previous.lastMotionAt || 0 : 0,
     ensureCount: 0, shellEverFound,
-    installToken, mode: "standard", version: "1.5.4",
+    installToken, mode: "standard", version: "1.5.5",
   };
   ensure();
   if (!window[STATE_KEY].profileAnalyzed) analyzeArt().then((result) => {
@@ -809,5 +809,5 @@
     state.profileAnalyzed = true;
     ensure();
   }).catch(() => {});
-  return { installed: true, version: "1.5.4", adaptive: true, compat: "26.903" };
+  return { installed: true, version: "1.5.5", adaptive: true, compat: "26.903" };
 })(__DREAM_CSS_JSON__, __DREAM_ART_JSON__, __DREAM_FULLSCREEN_ART_JSON__, __DREAM_THEME_JSON__)

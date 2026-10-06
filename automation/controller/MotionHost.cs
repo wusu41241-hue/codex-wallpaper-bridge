@@ -121,7 +121,7 @@ namespace CodexDreamSkinController
                         if (Interlocked.Exchange(ref dirty, 0) != 0) ReloadSource();
                         MotionSource current = CurrentSource();
                         bool captureActive = !safetySuspended && !File.Exists(Path.Combine(service.StateRoot, "paused")) &&
-                            current != null && current.Kind != "video" && (Volatile.Read(ref sceneClients) > 0 || (DateTime.UtcNow - lastFrameRequestUtc).TotalSeconds < 2);
+                            current != null && (Volatile.Read(ref sceneClients) > 0 || (DateTime.UtcNow - lastFrameRequestUtc).TotalSeconds < 2);
                         long nowTicks = Stopwatch.GetTimestamp();
                         if (captureActive && nowTicks >= nextCaptureAt)
                         {

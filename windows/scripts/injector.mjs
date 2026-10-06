@@ -8,7 +8,7 @@ import { MotionRelay } from "./motion-relay.mjs";
 const scriptPath = fileURLToPath(import.meta.url);
 const here = path.dirname(scriptPath);
 const root = path.resolve(here, "..");
-const SKIN_VERSION = "1.5.4";
+const SKIN_VERSION = "1.5.5";
 const MAX_ART_BYTES = 16 * 1024 * 1024;
 const STRONG_THEME_AUDIT_MS = 30000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -605,7 +605,7 @@ async function listTargetInventory(port) {
   return targets.map((item) => safeTargetLabel(item)).slice(0, 24);
 }
 
-async function loadPayload(themeDir = path.join(root, "assets"), candidateTheme = null) {
+export async function loadPayload(themeDir = path.join(root, "assets"), candidateTheme = null) {
   const loadedTheme = candidateTheme ?? await loadTheme(themeDir);
   const [css, template] = await Promise.all([
     fs.readFile(path.join(root, "assets", "dream-skin.css"), "utf8"),
@@ -634,6 +634,8 @@ async function loadPayload(themeDir = path.join(root, "assets"), candidateTheme 
       if (await fileExists(candidate)) { token = (await fs.readFile(candidate, "utf8")).trim(); break; }
     }
     if (!/^[a-f0-9]{64}$/.test(token)) throw new Error("Wallpaper motion token is invalid");
+    // Owl rejects loopback media URLs. Every dynamic wallpaper, including
+    // videos, uses the authenticated host renderer and bounded frame relay.
     rendererTheme = { ...loadedTheme.theme, motion: { ...loadedTheme.theme.motion, transport: "cdp" } };
     motionRelay = { key: loadedTheme.fingerprint, revision: loadedTheme.theme.motion.revision, token };
   }
